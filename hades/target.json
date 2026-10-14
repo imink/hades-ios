@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "target": "hades",
+  "expected_title_id": "0100535012974000",
+  "expected_content_version": 0,
+  "workspace_environment": "HADES_ROOT",
+  "default_workspace": "~/hades-work",
+  "module_policy": "discover-from-exefs",
+  "verified_build_ids": [],
+  "build_identity_source": "local extraction and rewrite receipts; no game addresses registered",
+  "d2r_patches_allowed": false,
+  "runtime_status": "v13-direct-binding-and-v14-post-submit-queue-wait-device-comparisons-negative; v16-device279-BC7-base-RGB-and-alpha-hashes-identical-to-Mac-scene-and-zero-inventory-overflow; v17-device-color-LOAD-comparison-negative; v18-device72-pass-pairs-394-indexed-draws-36-zero-draw-passes; v19-device-raw-draws392-and403-at1800-and3600-no-call-cap-later-window-no-pass-copies-73passes34-zero-versus-Mac76passes1-zero-557draws-same-callsites-and-FPCR0; v20-device-nonempty-batches-with-zero-draws; v21-Apple-signed-USB-installed-10saves-preserved-receipt-confirmed-4200presents-143Forge-samples-later77passes480draws25zero-main-scene-layout2-stride56-vertices3571-leaves24of200000bytes-versus-Mac-layout0-registration-order-difference; v22-readonly-directory-bytewise-order-probe-72tests-passed-Mac9600presents555later-draws-main-scene-layout0-Apple-signed15sections291resources42sources-verified-USB-installed-10saves-preserved-device-receipt-confirmed-3600presents-64and83passes-467and661draws-zero-zero-draw-passes-main-layout0-stride56-vertices4641-user-reports-success; graphics-milestone-not-full-port-completion",
+  "stages": {
+    "extraction": "implemented-local-receipt-required",
+    "rewrite_equivalence": "abi-only-local-receipt-required",
+    "dynamic_nro": "portable-abi-and-static-aot-local-receipt-required",
+    "module_loader": "strict-relocations-and-decoded-ro-core-not-guest-hipc",
+    "hle": "native-socket-PCM-and-keyboard-touch-Npad-publication; actual-native-menu-input-verified; headless-library-applet-and-device-input-unverified",
+    "graphics": "actual-Mac-colored-house-scene-verified; A17Pro-native-gameplay-and279-BC7-base-RGB-alpha-pairs-verified; iOS-black-silhouettes-and-flicker-observed-and-unresolved",
+    "ios_embed": "15-signed-sections-verified-Apple-Personal-Team-device-core-execution-passed",
+    "device_launch": "bundle22-iPhone16,2-iOS26.7.1-Apple-signed-USB-installed-10saves-preserved-exact-receipt-confirmed-user-entered-actual-scene-3600presents-both-Forge-windows-zero-zero-draw-passes-user-reports-success; full-session-stability-unverified; foreground-only-background-abort-observed"
+  }
+}

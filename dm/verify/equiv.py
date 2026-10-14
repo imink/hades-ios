@@ -30,6 +30,7 @@ TSD = 0x2000000
 SP0 = 0x800000
 DIR, MOD = A.dir, A.mod
 hdr = nsoimg.header(DIR, MOD)                  # 表头：段边界与写死进指令的线程槽号 | Header: segment boundaries and the thread slot numbers hard-coded into instructions
+IB += hdr.get('LOAD_BIAS', 0)
 PATCH_OFF = hdr['PATCH_OFF']
 KEY_IDX = {k[4:-4]: v for k, v in hdr.items() if k.startswith('KEY_') and k.endswith('_IDX')}
 KEY_SLOT = {k: 300 + i for i, k in enumerate(sorted(KEY_IDX, key=KEY_IDX.get))}

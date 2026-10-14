@@ -52,8 +52,23 @@ def llvm_dis(blob, base):
     with tempfile.TemporaryDirectory() as td:
         b, e = os.path.join(td, 'x.bin'), os.path.join(td, 'x.elf')
         open(b, 'wb').write(blob)
-        subprocess.run([f'{LLVM}/llvm-objcopy', '-I', 'binary', '-O', 'elf64-littleaarch64',
-                        '--rename-section', '.data=.text,code', b, e], check=True)
+        objcopy = f'{LLVM}/llvm-objcopy'
+        if os.path.isfile(objcopy):
+            subprocess.run([objcopy, '-I', 'binary', '-O', 'elf64-littleaarch64',
+                            '--rename-section', '.data=.text,code', b, e], check=True)
+        else:
+            # Xcode 没有 objcopy；只包装 ELF 容器，不引入把代码标成数据的汇编器映射符号。
+            # Xcode lacks objcopy; wrap only the ELF container, without assembler mapping symbols marking code as data.
+            names = b'\0.text\0.shstrtab\0'
+            string_off = 64 + len(blob)
+            section_off = (string_off + len(names) + 7) & ~7
+            elf_header = struct.pack('<16sHHIQQQIHHHHHH',
+                b'\x7fELF\x02\x01\x01' + bytes(9), 1, 183, 1, 0, 0, section_off, 0, 64, 0, 0, 64, 3, 2)
+            section = lambda *v: struct.pack('<IIQQQQIIQQ', *v)
+            sections = bytes(64) + section(1, 1, 6, 0, 64, len(blob), 0, 0, 4, 0) + \
+                section(7, 3, 0, 0, string_off, len(names), 0, 0, 1, 0)
+            with open(e, 'wb') as f:
+                f.write(elf_header + blob + names + bytes(section_off - string_off - len(names)) + sections)
         # 只留可能相关的行（x18/w18、tpidr、svc、cnt?ct），几百万行的筛选交给 grep
         # Keep only potentially relevant lines (x18/w18, tpidr, svc, cnt?ct); filtering millions of lines is left to grep
         od = subprocess.Popen([f'{LLVM}/llvm-objdump', '-d', '--no-show-raw-insn', e], stdout=subprocess.PIPE)
@@ -201,9 +216,10 @@ if nb: bad(f'改写点头不是跳进补丁区的 B：{len(nb)} 例 {[hex(x) for
 # ③ Independent denominator
 def cached_dis(blob):
     """原映像是固定数据：相关行按 sha 缓存（llvm 换版本另起键），只在首次付反汇编的十来秒。 | The original image is fixed data: relevant lines are cached by sha (a new llvm version gets a new key), so the ten-odd seconds of disassembly are paid only the first time."""
-    import hashlib, json
+    import hashlib, inspect, json
     cd = os.environ.get('DM_VCACHE', os.path.join(DM_ROOT, 'build/cache/dm/verify'))
-    ver = os.path.basename(os.path.dirname(LLVM.rstrip('/')))
+    version = subprocess.run([f'{LLVM}/llvm-objdump', '--version'], capture_output=True, text=True, check=True).stdout
+    ver = hashlib.sha256((version + inspect.getsource(llvm_dis)).encode()).hexdigest()[:16]
     p = os.path.join(cd, f'{mod}.{hashlib.sha256(blob).hexdigest()[:16]}.{ver}.json')
     if os.path.exists(p): return {int(k): v for k, v in json.load(open(p)).items()}
     d = llvm_dis(blob, 0)
@@ -472,6 +488,18 @@ for a, allowed in static_entries:
     s = btarget(a)
     if s is None: continue
     block = _block(s); static_seen += 1
+    if W(orig, a) == 0x9100025F:
+        # mov sp,x18：严格核对旧栈恢复模板；恢复的地址基寄存器不再是 sp。
+        # mov sp,x18: strictly check the old-stack restore template; its restore address base is no longer sp.
+        page_delta = ((h['KEY_PAGE_OFF'] & ~0xFFF) - ((s + 16) & ~0xFFF)) >> 12
+        adrp = 0x90000000 | ((page_delta & 3) << 29) | (((page_delta >> 2) & 0x7FFFF) << 5)
+        expected_stack = [
+            0xA93F0BE0, 0xF81E83E1, 0x910003E2, 0xD53BD061,
+            adrp, 0xF9400000 | (KEY['K18'] << 10), 0x8B000021,
+            0xF9400020, 0xF85E8041, 0x9100001F, 0xA97F0840, B(s + 44, a + 4)]
+        if [W(pat, s + 4 * i) for i in range(len(expected_stack))] != expected_stack:
+            bad(f'临时寄存器 {a:#x}：mov sp,x18 旧栈恢复模板不符')
+        continue
     if not allowed:
         end = next((hi for lo, hi in wins if lo == a), a + 4)
         for ins in _md.disasm(orig[a:end], a): allowed |= _writes(ins)

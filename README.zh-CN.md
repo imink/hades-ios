@@ -1,4 +1,21 @@
-# D2R Mobile
+# Hades iOS
+
+基于 [jhaizhou-ops/d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)
+实现的 Hades 原生 ARM64 iOS 兼容工程。V22 已在本次测试的 iPhone 15 Pro Max
+运行，用户确认画面问题已解决；真机日志独立证实，只读资源目录顺序固定后，
+已观察窗口中的零绘制通道消失。这是经过真机核验的里程碑，不等于全流程、
+长时间稳定性或其他机型保证；后台挂起仍未实现。
+
+请先阅读 [Hades 构建与验证说明](hades/README.zh-CN.md)、
+[English guide](hades/README.md) 和 [完整工程经验总结](hades/LESSONS.zh-CN.md)。
+游戏文件与合法来源的密钥需自行准备，仓库不分发这些内容。
+Hades 实际图形路线为 **Vulkan → MoltenVK → Metal**，不是 D2R 的 NVN 回放。
+
+## 保留的参考上游 D2R 文档
+
+以下内容描述原有 D2R 目标，不是 Hades 的操作说明。
+其中的准备脚本、游戏专用地址、性能数字及截图均不能直接用于 Hades，
+也不能作为 Hades 的验证证据。
 
 **开源的《暗黑破坏神 II：狱火重生》术士君临 iOS 兼容层。** 把你自己购买的 Nintendo Switch 版游戏（含「术士君临」资料片）完整带到 iPhone 和 iPad 上：原版内核原生执行，整套操作为触屏重做，稳定 60 帧，一秒进局。
 

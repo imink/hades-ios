@@ -79,9 +79,21 @@ _dm_gate:
     str x9, [sp, #776]
     mrs x9, fpcr
     str x9, [sp, #784]
+#ifdef HADES_HOST_GATE_STACK
+    // Keep the guest register frame, but run host C on a per-thread host stack.
+    mov x19, sp
+    bl _hades_gate_stack_top
+    mov sp, x0
+    ldr x0, [x19, #240]
+    mov x1, x19
+    bl _gate_dispatch
+    bl _hades_gate_stack_leave
+    mov sp, x19
+#else
     mov x0, x30              // 返回点 = 门标识 | Return point = gate identifier
     mov x1, sp               // regs
     bl _gate_dispatch
+#endif
     ldr x9, [sp, #784]
     msr fpcr, x9
     ldr x9, [sp, #776]

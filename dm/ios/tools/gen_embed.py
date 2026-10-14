@@ -22,13 +22,18 @@ for n in names:
     hdr = dict(l[2:].split() for l in open(f'{out}/{n}.fixups.tsv'))
     te, po = int(hdr['TEXT_END'], 16), int(hdr['PATCH_OFF'], 16)
     ko, ks = int(hdr['KEY_PAGE_OFF'], 16), int(hdr['KEY_PAGE_SIZE'], 16)
+    bias = int(hdr.get('LOAD_BIAS', '0'), 0)
+    assert bias in (0, 0x1000, 0x2000, 0x3000)
     bin_ = os.path.abspath(f'{out}/{n}.patched.bin'); sz = os.path.getsize(bin_)
-    a, end = r16(te), r16(sz)
-    assert po % PG == 0 and a <= ko and ko + ks <= po and ko % PG == 0 and ks == PG
+    a, end = r16(te + bias) - bias, r16(sz + bias) - bias
+    assert (po + bias) % PG == 0 and a <= ko and ko + ks <= po and (ko + bias) % PG == 0 and ks == PG
     for sect, lo, hi in ((f'__TEXT,__dm{n}x0', 0, a), (f'__DM{n}W,__img', a, po), (f'__TEXT,__dm{n}x1', po, end)):
         assert all(len(x) <= 16 for x in sect.split(','))
         fill = min(hi, sz) - lo
-        asm += [f'    .section {sect}', '    .p2align 14', f'    .incbin "{bin_}", {lo:#x}, {fill:#x}']
+        asm += [f'    .section {sect}', '    .p2align 14']
+        if lo == 0 and bias:
+            asm.append(f'    .space {bias:#x}')
+        asm.append(f'    .incbin "{bin_}", {lo:#x}, {fill:#x}')
         if hi - lo > fill: asm.append(f'    .space {hi - lo - fill:#x}')
         asm.append('    .p2align 14')   # 节尾补到 16K：vm_remap 按整页取 | Pad the section end to 16K: vm_remap takes whole pages
     flags.append(f'-Wl,-segprot,__DM{n}W,rw,rw')

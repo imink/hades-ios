@@ -1,4 +1,24 @@
-# D2R Mobile
+# Hades iOS
+
+Native ARM64 Hades compatibility work based on
+[jhaizhou-ops/d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile).
+The V22 build runs on the tested iPhone 15 Pro Max, and the user reports that
+the visible graphics problem is resolved. Device logs independently show that
+the observed zero-draw passes disappeared after deterministic read-only resource
+enumeration. This is a verified device milestone, not a guarantee of full-game
+stability or support for other devices. Background suspension remains unimplemented.
+
+Start with the [Hades build and validation guide](hades/README.md),
+[Chinese guide](hades/README.zh-CN.md), and
+[engineering lessons learned (Chinese)](hades/LESSONS.zh-CN.md).
+Bring your own legally obtained game files and keys; none are distributed here.
+The Hades game uses **Vulkan → MoltenVK → Metal**, not the D2R NVN playback route.
+
+## Retained upstream D2R documentation
+
+The documentation below describes the original D2R target, not Hades.
+Its setup scripts, game-specific addresses, performance figures and screenshots
+must not be used as Hades instructions or evidence.
 
 **An open-source iOS compatibility layer for Diablo II: Resurrected with the Reign of the Warlock expansion.** It brings the Nintendo Switch release you bought, expansion included, to iPhone and iPad in full: the original game code runs natively, every control is rebuilt for touch, the frame rate holds at 60 fps, and you are in a game one second after the main menu.
 

@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+local.env
+reports/
+data/
+build/
+Gen/
+*.nsp
+*.nca
+*.tik
+*.cert
+*.keys
+*.nso
+*.bin
+*.metallib
+*.ipa

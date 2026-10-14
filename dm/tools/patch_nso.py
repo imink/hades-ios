@@ -1,5 +1,6 @@
 # 通用 NSO 改写器：Switch aarch64 模块 → 可在苹果系统原生执行的映像。
 # 用法：patch_nso.py <NSO 文件> <输出目录> <模块名>
+# --profile portable-abi 只改写平台 ABI，禁用所有 D2R 剪口、规则、观测及参数表。
 # 改写（苹果内核会改 x18 与 tpidr_el0；Horizon 的线程区、svc、计时器在苹果上没有对应物）：
 #   x18 读写            → 线程槽 K18（TSD，经 tpidrro_el0）
 #   mrs tpidr_el0       → 读线程槽 KTLS；msr tpidr_el0 → 写 KTLS
@@ -11,6 +12,7 @@
 # 输出：<名>.patched.bin（键页与补丁区接在映像后 PATCH_OFF）、<名>.fixups.tsv（布局与键页下标表头）、<名>.gates.tsv、<名>.sites.tsv、<名>.cuts.tsv、<名>.obs.tsv
 # Generic NSO rewriter: Switch aarch64 module → an image that can execute natively on Apple systems.
 # Usage: patch_nso.py <NSO file> <output dir> <module name>
+# --profile portable-abi rewrites only the platform ABI, disabling all D2R cuts, rules, observations and parameters.
 # Rewrites (the Apple kernel modifies x18 and tpidr_el0; Horizon's thread area, svc and timers have no counterpart on Apple):
 #   x18 read/write      → thread slot K18 (TSD, via tpidrro_el0)
 #   mrs tpidr_el0       → read thread slot KTLS; msr tpidr_el0 → write KTLS
@@ -20,12 +22,22 @@
 #   Registered observation gates (OBS, restricted by build ID): one instruction at the entry is replaced with "enter the host observation callback → execute the original instruction → jump back", so diagnostics modify zero code at runtime; listed in <name>.obs.tsv
 # The key page only stores "actual key number × 8" at the end of the data segment, and patch code fetches thread slots indirectly through the key page: the loader may use any key number.
 # Output: <name>.patched.bin (key page and patch area appended after the image at PATCH_OFF), <name>.fixups.tsv (layout and key page index header), <name>.gates.tsv, <name>.sites.tsv, <name>.cuts.tsv, <name>.obs.tsv
-import struct, re, sys, os
+import argparse, struct, re, sys, os
 from itertools import combinations
 import lz4.block
 from capstone import *
+from capstone.arm64 import ARM64_OP_MEM, ARM64_REG_X18, ARM64_SFT_LSL
 
-src, outdir, NAME = sys.argv[1], sys.argv[2], sys.argv[3]
+ap = argparse.ArgumentParser(description='Offline ARM64 NSO platform-ABI rewrite')
+ap.add_argument('src'); ap.add_argument('outdir'); ap.add_argument('name')
+ap.add_argument('--profile', choices=('d2r', 'portable-abi'), default='d2r')
+ap.add_argument('--load-bias', type=lambda value: int(value, 0), default=0)
+A = ap.parse_args()
+src, outdir, NAME = A.src, A.outdir, A.name
+PORTABLE_ABI = A.profile == 'portable-abi'
+LOAD_BIAS = A.load_bias
+if LOAD_BIAS not in (0, 0x1000, 0x2000, 0x3000) or (LOAD_BIAS and not PORTABLE_ABI):
+    ap.error('A 4KiB-granule load bias within a 16KiB page requires portable-abi')
 d = open(src, 'rb').read()
 assert d[:4] == b'NSO0'
 flags = struct.unpack_from('<I', d, 0xc)[0]
@@ -39,9 +51,10 @@ for i, (fo, mo, sz) in enumerate(segs):
     IMG[mo:mo + sz] = raw
 TEXT_END = segs[0][2]
 RO_OFF, DATA_OFF = segs[1][1], segs[2][1]
-KEY_PAGE_OFF = (len(IMG) + 0x3FFF) & ~0x3FFF
+KEY_PAGE_OFF = ((len(IMG) + LOAD_BIAS + 0x3FFF) & ~0x3FFF) - LOAD_BIAS
+IMG.extend(bytes(KEY_PAGE_OFF - len(IMG)))
 IMG.extend(bytes(0x4000))
-PATCH_OFF = (len(IMG) + 0xFFFF) & ~0xFFFF
+PATCH_OFF = ((len(IMG) + LOAD_BIAS + 0xFFFF) & ~0xFFFF) - LOAD_BIAS
 
 # ---- 已登记剪口：{NSO 构建号: [(偏移, 原字节, 新字节, 理由)]} ----
 # 联网剪口（排除范围：战网 / 联机）：取自社区离线修复（LFS Mod Offline Fix for v2228224，与官方 94012 main 只差这 7 个字）。
@@ -166,7 +179,7 @@ OBS = {'db0507f36b84200ac05f75d76ed5026f': [
 BUILD_ID = d[0x40:0x50].hex()
 # 构建期产品规则：旧原资源/对拍域默认不变；触屏版单独出新版本，不在运行时写客体代码。
 # Build-time product rules: the old original-resource / comparison domain is unchanged by default; the touchscreen version is issued separately as a new version, and guest code is not written at runtime.
-RULESET = os.environ.get('DM_RULESET', 'native')
+RULESET = 'native' if PORTABLE_ABI else os.environ.get('DM_RULESET', 'native')
 assert RULESET in ('native', 'touch-run-v4'), f'未知规则域 {RULESET}'
 RULE_BUILD = 'db0507f36b84200ac05f75d76ed5026f'
 RULE_RUN = RULESET == 'touch-run-v4' and NAME == 'main'
@@ -174,10 +187,10 @@ if RULE_RUN:
     import hashlib
     assert BUILD_ID == RULE_BUILD, f'Run规则构建号不符 {BUILD_ID}'
     RULE_ORIG_SHA = hashlib.sha256(IMG).hexdigest()
-cuts = list(CUTS.get(BUILD_ID, []))
+cuts = [] if PORTABLE_ABI else list(CUTS.get(BUILD_ID, []))
 # 触屏版规则域默认同时带宿主私有门；规则闸门可显式关闭，保留同一出包入口和规则域。
 # The touchscreen rule domain by default also carries the host-private gates; the rule gate check can turn them off explicitly, keeping the same packaging entry point and rule domain.
-PRIVATE_GATES = os.environ.get("DM_PRIVATE_GATES", "1") != "0"
+PRIVATE_GATES = not PORTABLE_ABI and os.environ.get("DM_PRIVATE_GATES", "1") != "0"
 PRIVATE_AIM = RULE_RUN and PRIVATE_GATES
 if PRIVATE_AIM:
     cuts.append((0x2faf04, 'fde7fe97', 'c11000d4',
@@ -336,6 +349,19 @@ def site_plain(ins):
     emit(subst(ins, S))
     emit(STRX(S, T))                 # 一律写回：capstone 会漏报写入（adds w18 实例） | Always write back: capstone can miss reporting a write (the adds w18 instance)
     emit(LDP(S, T, 31, save - dlt)); emit(B(here(), ins.address + 4))
+    return start
+
+def site_stack_switch(ins):
+    """从 x18 切换栈，仍用旧栈地址恢复临时寄存器。 | Switch stacks from x18, restoring scratch registers via the old stack address."""
+    assert ins.mnemonic == 'mov' and ins.op_str == 'sp, x18'
+    S, T, U = pick({18}, 3)
+    start = here()
+    emit(STP(S, U, 31, -16)); emit(STUR(T, 31, -24))
+    emit(ADDI(U, 31, 0))
+    emit(MRS_TPIDRRO(T)); emit_slot_addr(T, S, 'K18'); emit(LDRX(S, T))
+    emit(LDUR(T, U, -24))
+    emit(ADDI(31, S, 0))
+    emit(LDP(S, U, U, -16)); emit(B(here(), ins.address + 4))
     return start
 
 def site_cond(ins):
@@ -540,6 +566,45 @@ import bisect
 def func_of(a):
     i = bisect.bisect_right(starts, a) - 1
     return (starts[i], starts[i + 1] if i + 1 < len(starts) else TEXT_END) if i >= 0 else (a, a + 4)
+
+def signed_offset_jump(insl, j):
+    """Recognize a bounded signed-offset table; retain every possible landing address."""
+    if j < 4:
+        return None
+    cmp, guard, load, add = insl[j - 4:j]
+    if not (cmp.mnemonic == 'cmp' and cmp.op_str.startswith('w18, #')
+            and guard.mnemonic == 'b.hi' and load.mnemonic == 'ldrsw'
+            and len(load.operands) == 2 and load.operands[0].reg == ARM64_REG_X18
+            and add.mnemonic == 'add'):
+        return None
+    mem = load.operands[1]
+    if mem.type != ARM64_OP_MEM or mem.mem.index != ARM64_REG_X18 or mem.shift.type != ARM64_SFT_LSL or mem.shift.value != 2 or mem.mem.disp:
+        return None
+    reg = load.reg_name(mem.mem.base)
+    if add.op_str != f'x18, x18, {reg}':
+        return None
+    count = cmp.operands[1].imm + 1
+    assert 0 < count <= 256, f'signed table bound {insl[j].address:x}'
+    prefix = insl[:j - 4]
+    definition = next((i for i in range(len(prefix) - 1, 0, -1)
+                       if prefix[i].mnemonic == 'add' and prefix[i].op_str.startswith(f'{reg}, {reg}, #')
+                       and prefix[i - 1].mnemonic == 'adrp' and prefix[i - 1].op_str.startswith(reg + ',')), None)
+    assert definition is not None, f'signed table base {insl[j].address:x}'
+    for instruction in insl[definition + 1:j - 2]:
+        _, writes = instruction.regs_access()
+        assert mem.mem.base not in writes and num(reg.replace('x', 'w')) not in {
+            num(instruction.reg_name(r)) for r in writes if instruction.reg_name(r).startswith(('x', 'w'))}, \
+            f'signed table base clobber {insl[j].address:x}'
+        assert instruction.mnemonic not in ('bl', 'blr'), f'signed table call clobber {insl[j].address:x}'
+    table = prefix[definition - 1].operands[1].imm + prefix[definition].operands[2].imm
+    assert RO_OFF <= table and table + count * 4 <= DATA_OFF, f'signed table outside ro {insl[j].address:x}'
+    targets = [table + struct.unpack_from('<i', IMG, table + i * 4)[0] for i in range(count)]
+    assert all(0 <= target < TEXT_END and target % 4 == 0 for target in targets), \
+        f'signed table invalid target {insl[j].address:x}'
+    base, end = min(targets), max(targets)
+    assert end - base <= 0x10000, f'signed table span {insl[j].address:x}'
+    return base, (end - base) // 4 + 1
+
 done = set(); windows = []; jumps = {}
 funcs = sorted({func_of(a) for a, (k, _) in kinds.items() if k == 'x18'})
 for fa, fb in funcs:
@@ -549,10 +614,23 @@ for fa, fb in funcs:
         windows.append(wseg); done |= {x.address for x in wseg}
     for j, ins in enumerate(insl):
         if ins.mnemonic == 'br' and ins.op_str == 'x18':
+            signed_table = signed_offset_jump(insl, j) if PORTABLE_ABI else None
+            if signed_table is not None:
+                jumps[ins.address] = signed_table
+                continue
             base = width = None
-            ctx = insl[max(0, j - 8):j]
+            # 同一基本块中可有任意数量不相关指令；Hades 在 add 与 br 之间初始化六个 SIMD 寄存器。
+            # A basic block may contain unrelated instructions; Hades initializes six SIMD registers between add and br.
+            block_start = j
+            while block_start:
+                prev = insl[block_start - 1].mnemonic
+                if prev in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') or prev.startswith('b.'):
+                    break
+                block_start -= 1
+            ctx = insl[block_start:j]
             for p in reversed(ctx):
                 if p.mnemonic == 'adr' and p.op_str.startswith('x18,'): base = p.operands[1].imm; break
+            base_ins = p if base is not None else None
             for p in reversed(ctx):
                 if p.mnemonic == 'add' and p.op_str.startswith('x18, x18,') and 'lsl #2' in p.op_str:
                     idx = num(p.reg_name(p.operands[2].reg))
@@ -562,6 +640,13 @@ for fa, fb in funcs:
                         if width: break
                     break
             assert base and width, f'jump table {ins.address:x}'
+            if PORTABLE_ABI:
+                assert base_ins.address < q.address < p.address, f'jump table ordering {ins.address:x}'
+                assert q.mnemonic in ('ldrb', 'ldrh'), f'signed jump table index {ins.address:x}'
+                assert not any(has18(x) for x in ctx if base_ins.address < x.address < p.address or x.address > p.address), \
+                    f'jump table x18 clobber {ins.address:x}'
+                assert not any(re.search(rf'\b[xw]{idx}\b', x.op_str) for x in ctx if q.address < x.address < p.address), \
+                    f'jump table index clobber {ins.address:x}'
             jumps[ins.address] = (base, width)
     # 不许有跳转落进窗口中间
     # No jump may land in the middle of a window
@@ -583,6 +668,7 @@ for a in sorted(kinds):
         if m == 'br': st = site_br(ins, *jumps[a]); stat('br')
         elif m in ('cbz', 'cbnz', 'tbz', 'tbnz'): st = site_cond(ins); stat('cond')
         elif m in ('adr', 'adrp'): st = site_pcrel(ins); stat('pcrel')
+        elif m == 'mov' and ins.op_str == 'sp, x18': st = site_stack_switch(ins); stat('stack_switch')
         elif m in ('blr', 'ret', 'b', 'bl') or (m == 'ldr' and '[' not in ins.op_str): raise RuntimeError(f'{a:x} {m} {ins.op_str}')
         else: st = site_plain(ins); stat('plain')
     elif k == 'tpidr_r': st = site_sysreg_read(ins, 'KTLS'); stat(k)
@@ -616,7 +702,7 @@ elif RULE_RUN:
     patch.extend(bytes(0x80))
     stat('private_gates_reserved')
 
-obs = list(OBS.get(BUILD_ID, []))
+obs = [] if PORTABLE_ABI else list(OBS.get(BUILD_ID, []))
 if RULE_RUN and PRIVATE_GATES:
     obs.append((0x43ecc8, 6, "b8686953", "private touch-run-v4 PRE-ldr; full800 host ABI"))
     obs.append((0x1237c60, 8, "d10143ff", "ui world anchor: camera world->screen entry (camera, point, out); host swaps x0 to a copy whose projection is shifted by the UI rect y (iPad UI kept 16:9 inside a taller screen), game camera untouched"))
@@ -769,7 +855,7 @@ PARAMS = {'db0507f36b84200ac05f75d76ed5026f': [
     (0xb152bc, '52838e48', 0xb152c0, '72a800e8', 8, 'KASPECT', '新画面模式视口：边距 = (屏宽 − 屏高 × 上限) / 2，经 0x85bc90 设居中视口'),
     (0x23e888, '52838e48', 0x23e88c, '72a800e8', 8, 'KASPECT', '新画面模式坐标钳制（0x23e760）：x 夹进 [边距, 边距 + 屏高 × 上限]，宽屏两侧的指针 / 触摸不再被夹回中间'),
 ]}
-params = PARAMS.get(BUILD_ID, [])
+params = [] if PORTABLE_ABI else PARAMS.get(BUILD_ID, [])
 for oa, wa, ob_, wb, r, key, why in params:
     for o, w0 in ((oa, wa), (ob_, wb)):
         w = struct.unpack_from('<I', IMG, o)[0]
@@ -841,6 +927,8 @@ if RULE_RUN:
 elif os.path.exists(P('rules.tsv')):
     os.unlink(P('rules.tsv'))  # 重出native时清本模块旧规则登记，不让旧manifest混入原资源域 | When rebuilding native, clear this module's old rule registration so the old manifest does not leak into the original-resource domain
 with open(P('fixups.tsv'), 'w') as f:
+    if LOAD_BIAS:
+        f.write(f'# LOAD_BIAS\t{LOAD_BIAS:#x}\n')
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
 with open(P('gates.tsv'), 'w') as f:
@@ -864,7 +952,7 @@ print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch), 'PAT
 # 记录本身有竞态——同产物三次记录块集合 5292 / 5114 / 5281、发起线程亦有不同——重录只在构建号变化或主动改进时做，提交附 mini A/B）
 # The boot block list ships with main: take the repository's versioned data dm/data/bootlist_<main build ID>.tsv, copy it as is into the build output directory and write its sha256 (the list is checked in, not re-recorded for every version;
 # the recording itself is racy -- three recordings of the same build output gave block sets of 5292 / 5114 / 5281, and the initiating threads also differed -- re-record only when the build ID changes or for a deliberate improvement, and attach an A/B from the second Mac to the commit)
-if NAME == 'main':
+if NAME == 'main' and not PORTABLE_ABI:
     import hashlib, shutil
     BL = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', f'bootlist_{BUILD_ID}.tsv')
     if not os.path.isfile(BL):   # 公开仓库不带这份清单（它每行带原版资源块的开头字节）：没有就不预取，启动时少一步提前解码，别的不受影响 | the public repository does not ship this list (each line carries the first bytes of an original resource block): without it there is no prefetch, so launch skips one ahead-of-time decode step and nothing else is affected

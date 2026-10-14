@@ -3,3 +3,12 @@
 .iosdd_mac/
 .iosdd_*/
 .DS_Store
+
+# 本机密钥与游戏包不进入版本控制。
+# Local keys and game packages must never enter version control.
+keys/
+*.keys
+*.nsp
+*.nca
+*.tik
+*.cert

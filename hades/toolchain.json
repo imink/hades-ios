@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "scope": "isolated-local-tools-and-pinned-public-runtime-frameworks",
+  "moltenvk": {
+    "repository": "https://github.com/KhronosGroup/MoltenVK",
+    "tag": "v1.4.2",
+    "commit": "db66022459ffb663aa2b50f6b018bc2e124f5edf",
+    "license": "Apache-2.0",
+    "macos_asset": "MoltenVK-macos.tar",
+    "macos_sha256": "f95765a6229cb7b915990a2890ce12ebe36a730b021545d3d52ae69ce4c4024e",
+    "ios_asset": "MoltenVK-ios.tar",
+    "ios_sha256": "b5d947b1660e6e9fed40b9cd2387e160aaab9e80b775c0cef7e14059405178c1",
+    "policy": "Public-API static ARM64 frameworks only, verified official release assets in private session storage; no global installation, no private-API asset, no CPU JIT"
+  },
+  "nstool": {
+    "repository": "https://github.com/jakcron/nstool.git",
+    "commit": "cfb826ca6c165fbcd816fd7949df88ef3d72a948",
+    "build": "git submodule update --init --recursive; make deps; make",
+    "submodules": {
+      "libfmt": "b03b081e026ceb1226b45de926babe629d6c0688",
+      "liblz4": "561775a11e00cbd21a45031c64068cb5e1242608",
+      "libmbedtls": "74346376dd035e9fbc161cdb80afc646b72fde86",
+      "libpietendo": "5d50d02f8f3b8918bdfbbb599b8c4c1628660d89",
+      "libtoolchain": "578d170f5b294e4a9feb3cc2d504896e846f204e"
+    }
+  },
+  "spirv_cross": {
+    "repository": "https://github.com/KhronosGroup/SPIRV-Cross.git",
+    "commit": "aa217aeb6c9f0ace7a0ab233b28807edf45eb165",
+    "cmake_options": ["-DCMAKE_BUILD_TYPE=Release", "-DSPIRV_CROSS_ENABLE_TESTS=OFF", "-DSPIRV_CROSS_CLI=ON"]
+  },
+  "diagnostic_hactool": {
+    "repository": "https://github.com/SciresM/hactool.git",
+    "commit": "1d64a83450e025622f3468c28fc4164dad2c5ef6",
+    "required_by_prepare": false
+  }
+}
