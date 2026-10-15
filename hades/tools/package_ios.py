@@ -19,13 +19,14 @@ from prepare import REPO, outside_git, sha256, verified_modules, write_json
 from verify_embed import verify_object
 
 
-def info_plist(identifier):
+def info_plist(identifier, render_resolution="720p"):
     if not re.fullmatch(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", identifier):
         raise FormatError("Invalid iOS bundle identifier")
     return {
         "CFBundleIdentifier": identifier, "CFBundleExecutable": "HadesPortTest",
         "CFBundleName": "HadesPortTest", "CFBundleDisplayName": "Hades Port Test",
-        "CFBundlePackageType": "APPL", "CFBundleVersion": "22",
+        "CFBundlePackageType": "APPL", "CFBundleVersion": "31",
+        "HadesRenderResolution": render_resolution,
         "HadesDirectoryOrderProbe": True,
         "HadesVulkanBindingMode": "argument-buffers",
         "HadesVulkanQueueCompletionProbe": False,
@@ -208,7 +209,7 @@ def build_receipt(sources, bindings, images, vulkan):
     return hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def build(root, output, bindings, reuse_romfs_archive=None, moltenvk=None):
+def build(root, output, bindings, reuse_romfs_archive=None, moltenvk=None, render_resolution="720p"):
     root, output = outside_git(root), outside_git(output)
     bindings = outside_git(bindings)
     if output.exists():
@@ -218,7 +219,10 @@ def build(root, output, bindings, reuse_romfs_archive=None, moltenvk=None):
         raise FormatError("iOS package requires the verified Hades base version")
     catalog_digest = verify_catalog(root, bindings)
     output.mkdir(mode=0o700, parents=True)
-    flags = generate_artifacts(root, output / "generated", use_host_services=True, use_vulkan=moltenvk is not None)
+    flags = generate_artifacts(root, output / "generated", use_host_services=True, use_vulkan=moltenvk is not None,
+                               render_resolution=render_resolution)
+    plan = json.loads((output / "generated/plan.json").read_text())
+    images = Path(plan["embedded_images_directory"])
     vulkan_receipt = None
     if moltenvk:
         from vulkan_dispatch import framework, framework_receipt, generate
@@ -233,7 +237,7 @@ def build(root, output, bindings, reuse_romfs_archive=None, moltenvk=None):
     app.mkdir(parents=True)
     app.chmod(0o700)
     identifier = "local.hades.porttest"
-    (app / "Info.plist").write_bytes(plistlib.dumps(info_plist(identifier)))
+    (app / "Info.plist").write_bytes(plistlib.dumps(info_plist(identifier, render_resolution)))
     (app / "PkgInfo").write_bytes(b"APPL????")
     assets = output / "icons/Assets.xcassets/AppIcon.appiconset"
     assets.mkdir(parents=True)
@@ -270,10 +274,12 @@ def build(root, output, bindings, reuse_romfs_archive=None, moltenvk=None):
         "hades/runtime/core.h", "hades/runtime/callout.h", "hades/runtime/audio.h", "hades/runtime/memory.h", "hades/runtime/ipc.h",
         "hades/runtime/trace.h",
         "hades/runtime/diagnostics.h",
-        "hades/ios/policy.h",
+        "hades/ios/policy.h", "hades/ios/joystick.h", "hades/ios/fps.h",
+        "hades/ios/monitor.h", "hades/ios/controls.h", "hades/ios/action_button.h",
+        "hades/ios/haptics.h", "hades/runtime/display.h",
         "hades/runtime/threads.h", "hades/runtime/probes.h", "hades/ios/Entitlements.plist",
         "hades/runtime/host.h", "hades/runtime/save.h", "hades/runtime/host_bindings.def",
-        "hades/tools/package_ios.py", "hades/tools/link_modules.py", "hades/tools/verify_embed.py",
+        "hades/tools/package_ios.py", "hades/tools/link_modules.py", "hades/tools/verify_embed.py", "hades/tools/display.py",
         "dm/ios/tools/gen_embed.py", "dm/gfx/nvn/nvn_spirv_bind.h",
         "dm/gfx/nvn/nvn_obj.h", "dm/gfx/nvn/nvn_tex.h", "dm/gfx/nvn/include/nvn.h")]
     if moltenvk:
@@ -281,9 +287,9 @@ def build(root, output, bindings, reuse_romfs_archive=None, moltenvk=None):
                     "hades/runtime/vulkan_bindings.def", "hades/runtime/vulkan_optional.def",
                     "hades/tools/vulkan_dispatch.py", "hades/toolchain.json")]
     hashes = {str(path.relative_to(REPO)): sha256(path) for path in hashed}
-    build_identity = build_receipt(hashes, catalog_digest,
-        {name: sha256(root / "build/abi" / (name + ".patched.bin"))
-         for name in ("main", "subsdk0", "subsdk1", "sdk", "eos")}, vulkan_receipt)
+    image_hashes = {name: sha256(images / (name + ".patched.bin"))
+                    for name in ("main", "subsdk0", "subsdk1", "sdk", "eos")}
+    build_identity = build_receipt(hashes, catalog_digest, image_hashes, vulkan_receipt)
     metadata["HadesBuildReceipt"] = build_identity
     (app / "Info.plist").write_bytes(plistlib.dumps(metadata))
     executable = app / "HadesPortTest"
@@ -295,7 +301,7 @@ def build(root, output, bindings, reuse_romfs_archive=None, moltenvk=None):
              "-framework", "UIKit", "-framework", "Foundation", "-framework", "Metal",
              "-framework", "AudioToolbox",
              *flags, "-o", executable], output / "build.log")
-    verification = verify_object(executable, root / "build/abi", ["main", "subsdk0", "subsdk1", "sdk", "eos"], linked=True)
+    verification = verify_object(executable, images, ["main", "subsdk0", "subsdk1", "sdk", "eos"], linked=True)
     resources = app / "HadesData"
     if moltenvk:
         (app / "Licenses").mkdir()
@@ -323,7 +329,9 @@ def build(root, output, bindings, reuse_romfs_archive=None, moltenvk=None):
              "--timestamp=none", app], output / "adhoc-sign.log")
     command(["codesign", "--verify", "--strict", app], output / "signature-check.log")
     verified_modules(root)
-    verification = verify_object(executable, root / "build/abi", ["main", "subsdk0", "subsdk1", "sdk", "eos"], linked=True)
+    if any(sha256(images / (name + ".patched.bin")) != digest for name, digest in image_hashes.items()):
+        raise FormatError("Embedded images changed during packaging")
+    verification = verify_object(executable, images, ["main", "subsdk0", "subsdk1", "sdk", "eos"], linked=True)
     ipa = output / "HadesPortTest-resign-required.ipa"
     app_bytes = sum(path.stat().st_size for path in app.rglob("*") if path.is_file())
     if app_bytes > 4_000_000_000:
@@ -339,6 +347,8 @@ def build(root, output, bindings, reuse_romfs_archive=None, moltenvk=None):
         "target_device": "iPhone 15 Pro Max / A17 Pro / iPhone16,2; not yet device-verified",
         "host_services_enabled": True,
         "vulkan_profile": moltenvk is not None, "vulkan_framework": vulkan_receipt,
+        "render_resolution": plan["render_resolution"],
+        "embedded_images_sha256": image_hashes,
         "host_binding_names": json.loads((output / "generated/plan.json").read_text())["host_binding_names"],
         "iphoneos_sdk": sdk_version, "bindings_sha256": catalog_digest,
         "uncompressed_app_bytes": app_bytes, "uncompressed_app_limit_bytes": 4_000_000_000,
@@ -386,11 +396,13 @@ def main():
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--bindings", required=True, type=Path)
     parser.add_argument("--moltenvk", type=Path, help="Verified private official public-API static framework root")
+    parser.add_argument("--render-resolution", choices=("720p", "1080p", "wide-720p"), default="720p",
+                        help="Experimental profiles adjust build-identified guest window constants")
     parser.add_argument("--reuse-romfs-archive", type=Path,
                         help="Reverify and reference an existing private local archive without recompressing/copying it")
     args = parser.parse_args()
     try:
-        build(args.work, args.out, args.bindings, args.reuse_romfs_archive, args.moltenvk)
+        build(args.work, args.out, args.bindings, args.reuse_romfs_archive, args.moltenvk, args.render_resolution)
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         print(f"Hades iOS packaging failed: {error}", file=sys.stderr)
         return 2

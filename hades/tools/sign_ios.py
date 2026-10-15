@@ -166,7 +166,18 @@ def sign(package, work, output, profile_path, fingerprint, device, bundle, diagn
                                          app], output / "signed-entitlements.log"))
     if signed != entitlements:
         raise FormatError("Actual signed entitlements differ from the authorized request")
-    verification = verify_object(app / "HadesPortTest", work / "build/abi",
+    images = work / "build/abi"
+    preset = receipt.get("render_resolution", {}).get("preset", "720p")
+    if preset not in ("720p", "1080p", "wide-720p"):
+        raise FormatError("Unknown embedded render resolution")
+    if preset != "720p":
+        images = package / "generated/display-images"
+        expected = receipt.get("embedded_images_sha256", {})
+        if set(expected) != {"main", "subsdk0", "subsdk1", "sdk", "eos"}:
+            raise FormatError("Experimental package requires complete embedded image hashes")
+        if any(sha256(images / (name + ".patched.bin")) != digest for name, digest in expected.items()):
+            raise FormatError("Experimental image hash differs from package receipt")
+    verification = verify_object(app / "HadesPortTest", images,
                                  ["main", "subsdk0", "subsdk1", "sdk", "eos"], linked=True)
     result_ipa = output / "HadesPortTest-local-apple-signed.ipa"
     entries = archive_bundle(app, result_ipa)

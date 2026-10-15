@@ -58,6 +58,13 @@ static VkDeviceSize pass_read_bytes;
 static struct { VkShaderModule module; uint64_t fingerprint; } pass_shaders[512];
 static int vk_error(const char *message);
 
+static void log_swapchain_extent(const VkSwapchainCreateInfoKHR *info) {
+    static _Atomic unsigned logged;
+    if (atomic_fetch_add_explicit(&logged,1,memory_order_relaxed)<8)
+        fprintf(stderr,"[hades-vulkan] SWAPCHAIN_CREATED extent=%ux%u format=%u present-mode=%u min-images=%u; actual successful create, not proof of internal scene resolution\n",
+                info->imageExtent.width,info->imageExtent.height,info->imageFormat,info->presentMode,info->minImageCount);
+}
+
 static unsigned preserve_color_loads(VkAttachmentDescription *attachments,unsigned count) {
     unsigned changed=0;
     for (unsigned i=0;i<count;i++)
@@ -916,6 +923,8 @@ int hades_vulkan_prepare(void *layer) {
         surface_layer.drawableSize = CGSizeMake(1280,720);
     if (hades_ipc_set_display_size((uint32_t)surface_layer.drawableSize.width,(uint32_t)surface_layer.drawableSize.height))
         return vk_error("Cannot publish actual host drawable extent");
+    fprintf(stderr,"[hades-vulkan] HOST_DISPLAY_EXTENT extent=%ux%u; published to guest display IPC\n",
+            (uint32_t)surface_layer.drawableSize.width,(uint32_t)surface_layer.drawableSize.height);
     const char *extensions[] = {VK_KHR_SURFACE_EXTENSION_NAME,VK_EXT_METAL_SURFACE_EXTENSION_NAME,VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
     VkApplicationInfo application = {.sType=VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pApplicationName="Hades local Vulkan adapter",.apiVersion=VK_API_VERSION_1_1};
@@ -1591,6 +1600,7 @@ int hades_vulkan_call(unsigned index, const char *name, uint64_t *r) {
                     fprintf(stderr,"[hades-capture] Owned swapchain registry exhausted\n");
                     return -1;
                 }
+                log_swapchain_extent(&info);
             }
             return 0;
         }
@@ -1709,6 +1719,16 @@ int hades_vulkan_call(unsigned index, const char *name, uint64_t *r) {
                 fprintf(stderr,"[hades-vulkan] TEXTURE_FORMAT_QUERY format=%u optimal=%#x linear=%#x buffer=%#x\n",
                     (unsigned)input[1],properties->optimalTilingFeatures,properties->linearTilingFeatures,
                     properties->bufferFeatures);
+            }
+        }
+        if (index==HADES_HOST_VULKAN_CREATE_SWAPCHAIN && r[0]==VK_SUCCESS)
+            log_swapchain_extent((const void *)(uintptr_t)input[1]);
+        if (index==HADES_HOST_VULKAN_CREATE_FRAMEBUFFER && r[0]==VK_SUCCESS) {
+            static _Atomic unsigned logged;
+            if (atomic_fetch_add_explicit(&logged,1,memory_order_relaxed)<32) {
+                const VkFramebufferCreateInfo *info=(const void *)(uintptr_t)input[1];
+                fprintf(stderr,"[hades-vulkan] FRAMEBUFFER_CREATED extent=%ux%u layers=%u attachments=%u; actual successful create\n",
+                        info->width,info->height,info->layers,info->attachmentCount);
             }
         }
         if (index==HADES_HOST_VULKAN_CREATE_IMAGE && r[0]==VK_SUCCESS) {

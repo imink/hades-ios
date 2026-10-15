@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <CommonCrypto/CommonDigest.h>
 
 static _Alignas(16384) unsigned char arena[16384];
 static _Alignas(16384) unsigned char readonly[16384];
@@ -27,8 +28,8 @@ int main(int argc, char **argv) {
     assert(!hades_memory_initialize(&config));
     assert(!hades_memory_register((uintptr_t)arena, sizeof arena, 4, 3, 99));
     assert(!hades_memory_register((uintptr_t)readonly, sizeof readonly, 4, 1, 100));
-    assert(!hades_host_initialize(argv[1]));
-    assert(hades_host_initialize(argv[1]));
+    assert(!hades_host_initialize(argv[1],"720p",NULL,0));
+    assert(hades_host_initialize(argv[1],"720p",NULL,0));
     uint32_t *npad=(uint32_t *)(arena+128);
     *npad=0;
     memset(arena+132,0xa5,16);
@@ -202,9 +203,58 @@ int main(int argc, char **argv) {
     assert(!*(uint32_t *)(arena+400));
     assert(call(HADES_HOST_COUNT,0,0,0,0,0,NULL));
     assert(!hades_host_shutdown());
-    assert(!hades_host_initialize(argv[1]) && !hades_host_configure_user(argv[2]));
+    assert(!hades_host_initialize(argv[1],"720p",NULL,0) && !hades_host_configure_user(argv[2]));
     assert(!call(HADES_HOST_ACCOUNT_INITIALIZE,0,0,0,0,0,NULL));
     assert(!call(HADES_HOST_ACCOUNT_LAST,(uintptr_t)arena+96,0,0,0,0,NULL) && !memcmp(arena+96,uid,16));
+    assert(!hades_host_shutdown());
+    const unsigned char variant[]="X = 1170\n";
+    hades_ui_overlay overlay={.path="Content/Test.sjson",.source_size=11,
+                              .size=sizeof variant-1,.data=variant};
+    CC_SHA256("hello world",11,overlay.source_digest);
+    assert(hades_host_initialize(argv[1],"720p",&overlay,1));
+    assert(hades_host_initialize(argv[1],"wide-720p",NULL,0));
+    assert(!hades_host_initialize(argv[1],"wide-720p",&overlay,1));
+    assert(!call(HADES_HOST_FS_INITIALIZE,0,0,0,0,0,NULL));
+    strcpy((char *)arena+256,"rom");
+    assert(!call(HADES_HOST_FS_ROM_MOUNT,(uintptr_t)arena+256,(uintptr_t)arena+12288,4096,0,0,NULL));
+    strcpy((char *)arena+256,"rom:/Content/Test.sjson");
+    overlay.source_digest[0]^=1;
+    assert(call(HADES_HOST_FS_OPEN,(uintptr_t)arena+384,(uintptr_t)arena+256,1,0,0,NULL));
+    overlay.source_digest[0]^=1;
+    overlay.source_size++;
+    assert(call(HADES_HOST_FS_OPEN,(uintptr_t)arena+384,(uintptr_t)arena+256,1,0,0,NULL));
+    overlay.source_size--;
+    assert(!call(HADES_HOST_FS_OPEN,(uintptr_t)arena+384,(uintptr_t)arena+256,1,0,0,NULL));
+    file=*(uint64_t *)(arena+384);
+    assert(!call(HADES_HOST_FS_SIZE,(uintptr_t)arena+400,file,0,0,0,NULL));
+    assert(*(uint64_t *)(arena+400)==sizeof variant-1);
+    assert(!call(HADES_HOST_FS_READ,(uintptr_t)arena+400,file,0,(uintptr_t)arena+512,64,NULL));
+    assert(*(uint64_t *)(arena+400)==sizeof variant-1 && !memcmp(arena+512,variant,sizeof variant-1));
+    assert(!call(HADES_HOST_FS_READ,(uintptr_t)arena+400,file,3,(uintptr_t)arena+512,4,NULL));
+    assert(*(uint64_t *)(arena+400)==4 && !memcmp(arena+512,variant+3,4));
+    assert(!call(HADES_HOST_FS_READ,(uintptr_t)arena+400,file,sizeof variant,(uintptr_t)arena+512,4,NULL));
+    assert(!*(uint64_t *)(arena+400));
+    assert(!call(HADES_HOST_FS_CLOSE,file,0,0,0,0,NULL));
+    strcpy((char *)arena+256,"rom:/Content");
+    assert(!call(HADES_HOST_FS_OPEN_DIRECTORY,(uintptr_t)arena+384,(uintptr_t)arena+256,2,0,0,NULL));
+    directory=*(uint64_t *)(arena+384);
+    assert(!call(HADES_HOST_FS_READ_DIRECTORY,(uintptr_t)arena+400,(uintptr_t)arena+1024,directory,1,0,NULL));
+    assert(*(int64_t *)(arena+400)==1 && !strcmp((char *)arena+1024,"Test.sjson")
+           && *(int64_t *)(arena+1024+0x308)==sizeof variant-1);
+    assert(!call(HADES_HOST_FS_CLOSE_DIRECTORY,directory,0,0,0,0,NULL));
+    assert(!hades_host_shutdown());
+    assert(!hades_host_initialize(argv[1],"720p",NULL,0));
+    assert(!call(HADES_HOST_FS_INITIALIZE,0,0,0,0,0,NULL));
+    strcpy((char *)arena+256,"rom");
+    assert(!call(HADES_HOST_FS_ROM_MOUNT,(uintptr_t)arena+256,(uintptr_t)arena+12288,4096,0,0,NULL));
+    strcpy((char *)arena+256,"rom:/Content/Test.sjson");
+    assert(!call(HADES_HOST_FS_OPEN,(uintptr_t)arena+384,(uintptr_t)arena+256,1,0,0,NULL));
+    file=*(uint64_t *)(arena+384);
+    assert(!call(HADES_HOST_FS_SIZE,(uintptr_t)arena+400,file,0,0,0,NULL));
+    assert(*(int64_t *)(arena+400)==11);
+    assert(!call(HADES_HOST_FS_READ,(uintptr_t)arena+400,file,0,(uintptr_t)arena+512,64,NULL));
+    assert(*(uint64_t *)(arena+400)==11 && !memcmp(arena+512,"hello world",11));
+    assert(!call(HADES_HOST_FS_CLOSE,file,0,0,0,0,NULL));
     assert(!hades_host_shutdown());
     assert(!hades_memory_unregister(99) && !hades_memory_unregister(100) && !hades_memory_shutdown());
     puts("HOST_BACKEND_OK: real file/cache/clock/calendar, durable local identity/save namespace, owned handles, invalid buffers/paths rejected");

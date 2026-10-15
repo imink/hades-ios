@@ -3,6 +3,8 @@
 #include "memory.h"
 #include "save.h"
 #include "trace.h"
+#include "display.h"
+#include <CommonCrypto/CommonDigest.h>
 #ifdef HADES_VULKAN_HOST
 #include "vulkan.h"
 #endif
@@ -33,12 +35,14 @@ static _Atomic unsigned char traced_calls[HADES_HOST_COUNT];
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static int root_fd = -1, user_fd = -1, fs_ready, pctl_ready, time_ready, account_ready;
 static int directory_order_probe;
+static const hades_ui_overlay *display_overlays;
+static unsigned display_overlay_count;
 static unsigned char local_user[16];
 static uint64_t user_handles[8], next_user = 0xAACC0001;
 static char mounted[32];
 static char save_mount[32];
 static hades_save save_session = {-1,-1,-1,0};
-static struct { uint64_t id; int fd, mode, save; } files[64];
+static struct { uint64_t id; int fd, mode, save; const hades_ui_overlay *overlay; } files[64];
 typedef struct { char name[0x301]; uint8_t padding[3]; int8_t type; uint8_t padding2[3]; int64_t size; } directory_entry;
 _Static_assert(sizeof(directory_entry) == 0x310, "Horizon directory entry ABI");
 static struct { uint64_t id; directory_entry *entries; size_t count, cursor; int save; } directories[32];
@@ -217,6 +221,15 @@ static int compare_directory_names(const void *left, const void *right) {
     return strcmp(a->name, b->name);
 }
 
+static const hades_ui_overlay *display_ui_for_path(const char *path, int save) {
+    const char *relative = strchr(path, ':');
+    if (!save && relative && relative[1] == '/')
+        for (unsigned i = 0; i < display_overlay_count; i++)
+            if (!strcmp(relative + 2, display_overlays[i].path))
+                return &display_overlays[i];
+    return NULL;
+}
+
 static int list_directory(const char *path, unsigned mode, int *save, directory_entry **output, size_t *count) {
     int fd = open_guest_path(path, O_RDONLY | O_DIRECTORY, save);
     if (fd < 0)
@@ -264,6 +277,18 @@ static int list_directory(const char *path, unsigned mode, int *save, directory_
         }
         entries[length] = (directory_entry){.type=S_ISDIR(info.st_mode) ? 0 : 1,
                                            .size=S_ISDIR(info.st_mode) ? 0 : info.st_size};
+        if (!*save && S_ISREG(info.st_mode)) {
+            char child[1100];
+            int size = snprintf(child, sizeof child, "%s%s%s", path,
+                                path[strlen(path) - 1] == '/' ? "" : "/", entry->d_name);
+            if (size < 0 || (size_t)size >= sizeof child) {
+                status = -1;
+                break;
+            }
+            const hades_ui_overlay *overlay = display_ui_for_path(child, 0);
+            if (overlay)
+                entries[length].size = (int64_t)overlay->size;
+        }
         if (strlcpy(entries[length].name, entry->d_name, sizeof entries[length].name) >= sizeof entries[length].name) {
             status = -1;
             break;
@@ -302,6 +327,29 @@ static int read_actual(int fd, unsigned char *destination, int64_t offset, size_
     return 0;
 }
 
+static int verify_display_ui(int fd, off_t size, const hades_ui_overlay *overlay) {
+    if (size<0 || (uint64_t)size!=overlay->source_size)
+        return error("Wide UI source size differs from the embedded overlay manifest");
+    unsigned char *source=malloc(overlay->source_size);
+    if (!source)
+        return error("Cannot allocate wide UI verification buffer");
+    size_t got;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    int status=read_actual(fd,source,0,overlay->source_size,&got);
+    if (!status && got==overlay->source_size)
+        CC_SHA256(source,(CC_LONG)overlay->source_size,digest);
+    else
+        status=-1;
+    if (!status && memcmp(digest,overlay->source_digest,sizeof digest))
+        status=-1;
+    free(source);
+    if (status)
+        return error("Wide UI source verification failed; no overlay applied");
+    fprintf(stderr,"[hades-host] WIDE_UI_OVERLAY verified %s source=%zu presented=%zu bytes; source/archive unchanged\n",
+            overlay->path,overlay->source_size,overlay->size);
+    return 0;
+}
+
 static int local_save_directory(void) {
     if (mkdirat(user_fd, "saves", 0700) && errno != EEXIST)
         return error("Cannot create application-local save container");
@@ -333,18 +381,35 @@ static int ensure_local_save(void) {
     return 0;
 }
 
-int hades_host_initialize(const char *romfs) {
+int hades_host_initialize(const char *romfs, const char *render_resolution,
+                          const hades_ui_overlay *overlays, unsigned overlay_count) {
     pthread_mutex_lock(&lock);
-    if (!romfs || root_fd >= 0) {
+    uint32_t width,height;
+    if (!romfs || root_fd >= 0 || hades_display_extent(render_resolution,&width,&height)) {
         pthread_mutex_unlock(&lock);
         return error("Missing or duplicate host RomFS configuration");
     }
+    int wide=render_resolution && !strcmp(render_resolution,"wide-720p");
+    if ((!wide && overlay_count) || (wide && !overlay_count)
+        || (overlay_count && !overlays) || overlay_count>35) {
+        pthread_mutex_unlock(&lock);
+        return error("Invalid or non-wide UI overlay configuration");
+    }
+    for (unsigned i=0;i<overlay_count;i++)
+        if (!overlays[i].path || strncmp(overlays[i].path,"Content/",8) || !overlays[i].data
+            || !overlays[i].size || overlays[i].size>1024*1024
+            || !overlays[i].source_size || overlays[i].source_size>1024*1024) {
+            pthread_mutex_unlock(&lock);
+            return error("Invalid embedded UI overlay descriptor");
+        }
     const char *order = getenv("HADES_FS_DIRECTORY_ORDER_PROBE");
     if (order && strcmp(order, "0") && strcmp(order, "1")) {
         pthread_mutex_unlock(&lock);
         return error("Invalid HADES_FS_DIRECTORY_ORDER_PROBE; expected 0 or 1");
     }
     directory_order_probe = order && !strcmp(order, "1");
+    display_overlays=overlays;
+    display_overlay_count=overlay_count;
     root_fd = open(romfs, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (root_fd < 0) {
         pthread_mutex_unlock(&lock);
@@ -437,6 +502,8 @@ int hades_host_shutdown(void) {
         return error("Cannot close local user storage");
     }
     user_fd = -1;
+    display_overlays = NULL;
+    display_overlay_count = 0;
     memset(local_user, 0, sizeof local_user);
     fs_ready = pctl_ready = time_ready = account_ready = 0;
     mounted[0] = 0;
@@ -832,9 +899,15 @@ static int call_locked(unsigned index, uint64_t *registers) {
                 close(fd);
                 return error("Guest filesystem handle capacity exhausted");
             }
+            const hades_ui_overlay *overlay = display_ui_for_path(path, save);
+            if (overlay && verify_display_ui(fd,information.st_size,overlay)) {
+                close(fd);
+                return -1;
+            }
             files[slot].fd = fd;
             files[slot].mode = mode;
             files[slot].save = save;
+            files[slot].overlay = overlay;
             files[slot].id = next_file++;
             *(uint64_t *)(uintptr_t)registers[0] = files[slot].id;
             fprintf(stderr, "[hades-host] opened actual guest file %s\n", path);
@@ -900,7 +973,8 @@ static int call_locked(unsigned index, uint64_t *registers) {
             struct stat information;
             if (!hades_memory_writable(registers[0], 8) || fstat(fd, &information))
                 return error("Invalid file-size output or fstat failure");
-            *(int64_t *)(uintptr_t)registers[0] = information.st_size;
+            *(int64_t *)(uintptr_t)registers[0] = files[slot].overlay
+                ? (int64_t)files[slot].overlay->size : information.st_size;
         } else if (index == HADES_HOST_FS_READ) {
             int64_t offset = (int64_t)registers[2];
             size_t length = registers[4], got = 0;
@@ -922,7 +996,16 @@ static int call_locked(unsigned index, uint64_t *registers) {
                         return error("Cache lost ownership/permission or overlaps read output/count");
                 }
             }
-            if (length && !files[slot].save && selected->buffer && length <= selected->capacity) {
+            if (files[slot].overlay) {
+                const hades_ui_overlay *overlay=files[slot].overlay;
+                if ((uint64_t)offset<overlay->size) {
+                    got=overlay->size-(size_t)offset;
+                    if (got>length)
+                        got=length;
+                    if (got)
+                        memcpy((void *)(uintptr_t)registers[3],overlay->data+(size_t)offset,got);
+                }
+            } else if (length && !files[slot].save && selected->buffer && length <= selected->capacity) {
                 if (selected==&rom_cache) {
                     uint64_t magic;
                     memcpy(&magic,(const void *)(rom_cache.buffer-32),8);

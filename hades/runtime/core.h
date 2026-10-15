@@ -22,6 +22,7 @@ extern const uint64_t hades_address_space_limit;
 extern const uint64_t hades_priority_mask, hades_core_mask;
 extern const uint64_t hades_system_resource_budget;
 extern const char hades_display_version[16];
+extern const char hades_render_resolution[];
 extern const hades_gate hades_gates[];
 extern const hades_entry hades_bootstrap[6];
 extern const hades_entry hades_initializers[], hades_game_entry, hades_set_argc, hades_set_argv;

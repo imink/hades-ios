@@ -3,6 +3,8 @@
 #include "probes.h"
 #include "vulkan.h"
 #include "ipc.h"
+#include "display.h"
+#include "core.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,16 +75,23 @@ int hades_run_window_probe(int argc,const char *const *argv) {
     @autoreleasepool {
         NSApplication *application=[NSApplication sharedApplication];
         [application setActivationPolicy:NSApplicationActivationPolicyRegular];
-        NSWindow *window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,960,540)
+        uint32_t width,height;
+        if (hades_display_extent(hades_render_resolution,&width,&height)) {
+            fprintf(stderr,"[hades-window] Invalid embedded render resolution\n");
+            return 2;
+        }
+        NSRect frame=NSMakeRect(0,0,540.0*width/height,540);
+        NSWindow *window=[[NSWindow alloc] initWithContentRect:frame
             styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable
             backing:NSBackingStoreBuffered defer:NO];
         window.title=@"Hades local native rendering probe — not iOS gameplay evidence";
-        HadesProbeSurface *view=[[HadesProbeSurface alloc] initWithFrame:NSMakeRect(0,0,960,540)];
+        HadesProbeSurface *view=[[HadesProbeSurface alloc] initWithFrame:frame];
         view.wantsLayer=YES;
         window.contentView=view;
         CAMetalLayer *layer=(CAMetalLayer *)view.layer;
-        layer.contentsScale=1280.0/view.bounds.size.width;
-        layer.drawableSize=CGSizeMake(1280,720);
+        layer.contentsScale=(CGFloat)width/view.bounds.size.width;
+        layer.drawableSize=CGSizeMake(width,height);
+        fprintf(stderr,"[hades-window] RENDER_RESOLUTION requested=%ux%u; not proof of guest rendering extent\n",width,height);
         layer.framebufferOnly=NO;
         [window center];
         [window makeKeyAndOrderFront:nil];

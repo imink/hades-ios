@@ -3,6 +3,14 @@
 #include "../runtime/ipc.h"
 #include "../runtime/diagnostics.h"
 #include "policy.h"
+#include "joystick.h"
+#include "fps.h"
+#include "monitor.h"
+#include "haptics.h"
+#include "controls.h"
+#include "action_button.h"
+#include "../runtime/display.h"
+#include "../runtime/core.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <os/proc.h>
 #include <pthread.h>
@@ -12,6 +20,7 @@
 #include <unistd.h>
 #ifdef HADES_VULKAN_HOST
 #import <QuartzCore/CAMetalLayer.h>
+#import <Metal/Metal.h>
 #include "../runtime/vulkan.h"
 @interface HadesSurfaceView : UIView
 @end
@@ -22,18 +31,112 @@
 
 static NSString *logPath;
 static int requestedProbe=-1;
+static uint32_t renderWidth=1280,renderHeight=720;
+
+@interface HadesJoystick : UIControl
+@property(nonatomic, strong) UIView *thumb;
+@property(nonatomic, strong) UITouch *trackedTouch;
+@property(nonatomic) hades_joystick_state stick;
+- (void)reset;
+@end
+
+@implementation HadesJoystick
+- (instancetype)initWithFrame:(CGRect)frame {
+    self=[super initWithFrame:frame];
+    if (self) {
+        self.backgroundColor=[UIColor.blackColor colorWithAlphaComponent:.3];
+        self.layer.borderWidth=2;
+        self.layer.borderColor=[UIColor.whiteColor colorWithAlphaComponent:.3].CGColor;
+        self.exclusiveTouch=NO;
+        self.multipleTouchEnabled=NO;
+        self.accessibilityIdentifier=@"hades-input-joystick";
+        self.accessibilityLabel=@"移动摇杆";
+        self.thumb=[UIView new];
+        self.thumb.userInteractionEnabled=NO;
+        self.thumb.backgroundColor=[UIColor.whiteColor colorWithAlphaComponent:.45];
+        self.thumb.layer.borderWidth=2;
+        self.thumb.layer.borderColor=[UIColor.whiteColor colorWithAlphaComponent:.7].CGColor;
+        [self addSubview:self.thumb];
+    }
+    return self;
+}
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat diameter=MIN(self.bounds.size.width,self.bounds.size.height);
+    CGFloat thumbSize=diameter*.42;
+    CGFloat radius=(diameter-thumbSize)/2;
+    self.layer.cornerRadius=diameter/2;
+    self.thumb.bounds=CGRectMake(0,0,thumbSize,thumbSize);
+    self.thumb.layer.cornerRadius=thumbSize/2;
+    self.thumb.center=CGPointMake(CGRectGetMidX(self.bounds)+self.stick.thumb_x*radius,
+                                 CGRectGetMidY(self.bounds)-self.stick.thumb_y*radius);
+}
+- (void)updateTouch:(UITouch *)touch {
+    CGPoint point=[touch locationInView:self];
+    CGFloat radius=MIN(self.bounds.size.width,self.bounds.size.height)*.29;
+    if (radius<=0)
+        return;
+    self.stick=hades_joystick_position((point.x-CGRectGetMidX(self.bounds))/radius,
+                                      (CGRectGetMidY(self.bounds)-point.y)/radius);
+    [self setNeedsLayout];
+    [self sendActionsForControlEvents:UIControlEventValueChanged];
+}
+- (void)reset {
+    self.trackedTouch=nil;
+    self.stick=(hades_joystick_state){0};
+    [self setNeedsLayout];
+}
+- (void)setEnabled:(BOOL)enabled {
+    BOOL changed=!enabled && (self.trackedTouch || self.stick.x || self.stick.y);
+    [super setEnabled:enabled];
+    if (!enabled)
+        [self reset];
+    if (changed)
+        [self sendActionsForControlEvents:UIControlEventValueChanged];
+}
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (!self.enabled || self.trackedTouch)
+        return;
+    self.trackedTouch=touches.anyObject;
+    [self updateTouch:self.trackedTouch];
+}
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.trackedTouch && [touches containsObject:self.trackedTouch])
+        [self updateTouch:self.trackedTouch];
+}
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.trackedTouch && [touches containsObject:self.trackedTouch]) {
+        [self reset];
+        [self sendActionsForControlEvents:UIControlEventValueChanged];
+    }
+}
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [self touchesEnded:touches withEvent:event];
+}
+@end
 
 @interface HadesViewController : UIViewController
+@property(nonatomic, strong) HadesHaptics *haptics;
 @property(nonatomic, strong) UITextView *logView;
 @property(nonatomic, strong) NSArray<UIButton *> *runButtons;
 @property(nonatomic) BOOL running;
 @property(nonatomic) unsigned activeMode;
 @property(nonatomic, strong) NSArray<UIButton *> *inputButtons;
+@property(nonatomic, strong) HadesJoystick *joystick;
 @property(nonatomic, strong) UIView *gameContainer;
 @property(nonatomic, strong) NSLayoutConstraint *surfaceHeight;
 @property(nonatomic, strong) UIStackView *diagnosticStack;
 @property(nonatomic, strong) UIButton *diagnosticButton;
+@property(nonatomic, strong) UILabel *fpsLabel;
+@property(nonatomic, strong) NSTimer *fpsTimer;
+@property(nonatomic) hades_fps_counter fpsCounter;
+@property(nonatomic, strong) UIView *systemMonitor;
+@property(nonatomic, strong) UIButton *monitorClose;
+@property(nonatomic, strong) UITextView *monitorText;
+@property(nonatomic) hades_cpu_counter cpuCounter;
+@property(nonatomic) double monitorSampleTime;
 @property(nonatomic) BOOL inputConfigured;
+@property(nonatomic) BOOL actionHitAreaChecked;
 #ifdef HADES_VULKAN_HOST
 @property(nonatomic, strong) HadesSurfaceView *surface;
 #endif
@@ -122,6 +225,91 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
 }
 
 @implementation HadesViewController
+- (void)dealloc {
+    [self.fpsTimer invalidate];
+}
+- (void)resetFrameRate {
+    self.fpsCounter=(hades_fps_counter){0};
+    self.fpsLabel.text=@"FPS --";
+    self.cpuCounter=(hades_cpu_counter){0};
+    self.monitorSampleTime=0;
+    self.monitorText.text=@"等待采样…";
+}
+- (void)toggleSystemMonitor {
+    [self.haptics trigger:self.fpsLabel];
+    self.systemMonitor.hidden=!self.systemMonitor.hidden;
+    self.fpsLabel.accessibilityValue=self.systemMonitor.hidden ? @"监控已关闭" : @"监控已展开";
+    self.cpuCounter=(hades_cpu_counter){0};
+    self.monitorSampleTime=0;
+    self.monitorText.text=@"等待采样…";
+    if (!self.systemMonitor.hidden)
+        [self updateSystemMonitor];
+}
+- (void)updateSystemMonitor {
+    if (self.systemMonitor.hidden)
+        return;
+    double now=CACurrentMediaTime();
+    if (self.monitorSampleTime && now-self.monitorSampleTime<1.0)
+        return;
+    self.monitorSampleTime=now;
+    double seconds=0,percent=0;
+    NSString *cpu=@"采样中";
+    if (hades_cpu_seconds(&seconds)) {
+        self.cpuCounter=(hades_cpu_counter){0};
+        cpu=@"不可用";
+    } else {
+        int result=hades_cpu_sample(&_cpuCounter,seconds,now,&percent);
+        if (result==1)
+            cpu=[NSString stringWithFormat:@"%.1f%%",percent];
+        else if (result<0) {
+            fprintf(stderr,"[Hades-iOS] Invalid CPU monitor sample; no fabricated utilization\n");
+            cpu=@"不可用";
+        }
+    }
+    const double mib=1024.0*1024.0;
+    hades_memory_observation memory;
+    NSString *memoryText=@"内存占用 / 驻留：不可用";
+    if (!hades_observe_memory(&memory))
+        memoryText=[NSString stringWithFormat:@"内存占用：%.0f MiB（footprint）\n驻留内存：%.0f MiB",
+                    memory.physical_footprint/mib,memory.resident/mib];
+    NSString *metal=@"不可用";
+#ifdef HADES_VULKAN_HOST
+    id<MTLDevice> device=((CAMetalLayer *)self.surface.layer).device;
+    if (device)
+        metal=[NSString stringWithFormat:@"%.0f MiB",device.currentAllocatedSize/mib];
+#endif
+    NSString *thermal=@"未知";
+    switch (NSProcessInfo.processInfo.thermalState) {
+        case NSProcessInfoThermalStateNominal:thermal=@"正常";break;
+        case NSProcessInfoThermalStateFair:thermal=@"温热";break;
+        case NSProcessInfoThermalStateSerious:thermal=@"较高";break;
+        case NSProcessInfoThermalStateCritical:thermal=@"严重";break;
+        default:break;
+    }
+    self.monitorText.text=[NSString stringWithFormat:
+        @"%@（呈现提交）\nCPU：%@（100%% = 1 核）\n%@\nMetal 分配：%@\nApp 可用余量：%.0f MiB\n系统温度状态：%@\n仅当前 App；内存账目重叠，不能相加。",
+        self.fpsLabel.text,cpu,memoryText,metal,os_proc_available_memory()/mib,thermal];
+}
+- (void)updateFrameRate {
+#ifdef HADES_VULKAN_HOST
+    if (self.gameContainer.hidden || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) {
+        [self resetFrameRate];
+        return;
+    }
+    hades_fps_counter counter=self.fpsCounter;
+    double fps=0;
+    int result=hades_fps_sample(&counter,hades_vulkan_present_count(),CACurrentMediaTime(),&fps);
+    self.fpsCounter=counter;
+    if (result==1)
+        self.fpsLabel.text=[NSString stringWithFormat:@"FPS %.1f",fps];
+    else if (result<0 || result==2) {
+        fprintf(stderr,"[Hades-iOS] FPS_SAMPLE_RESET reason=%s; no fabricated frame rate\n",
+                result<0 ? "invalid monotonic timestamp" : "presentation counter restarted");
+        [self resetFrameRate];
+    }
+    [self updateSystemMonitor];
+#endif
+}
 - (void)runRequestedProbe {
     if (requestedProbe<0 || self.running || !self.view.window
         || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive)
@@ -149,25 +337,79 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
 #ifdef HADES_VULKAN_HOST
     if (self.gameContainer) {
         CGRect bounds=self.gameContainer.bounds;
-        CGFloat width=MIN(bounds.size.width,bounds.size.height*16.0/9.0);
-        self.surface.frame=CGRectMake((bounds.size.width-width)/2,(bounds.size.height-width*9.0/16.0)/2,width,width*9.0/16.0);
-        CAMetalLayer *layer=(CAMetalLayer *)self.surface.layer;
-        if (width>0) {
-            layer.contentsScale=1280.0/width;
-            layer.drawableSize=CGSizeMake(1280,720);
+        if (bounds.size.width<=0 || bounds.size.height<=0)
+            return;
+        hades_display_rect frame;
+        if (hades_display_layout(bounds.size.width,bounds.size.height,renderWidth,renderHeight,&frame)) {
+            fprintf(stderr,"[Hades-iOS] Invalid game display layout\n");
+            abort();
         }
-        const CGFloat positions[12][2]={{.13,.68},{.13,.9},{.065,.79},{.195,.79},
-            {.86,.78},{.92,.89},{.92,.67},{.98,.78},{.08,.1},{.92,.1},{.28,.79},{.5,.08}};
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        self.surface.frame=CGRectMake(frame.x,frame.y,frame.width,frame.height);
+        CAMetalLayer *layer=(CAMetalLayer *)self.surface.layer;
+        layer.contentsScale=(CGFloat)renderWidth/frame.width;
+        if (!CGSizeEqualToSize(layer.drawableSize,CGSizeMake(renderWidth,renderHeight)))
+            layer.drawableSize=CGSizeMake(renderWidth,renderHeight);
+        [CATransaction commit];
+        const CGFloat positions[8][2]={{.86,.78},{.92,.89},{.92,.67},{.98,.78},
+            {.08,.1},{.92,.1},{.32,.79},{.5,.08}};
         UIEdgeInsets inset=self.view.safeAreaInsets;
         CGFloat available=bounds.size.width-inset.left-inset.right;
+        CGFloat stickSize=MAX(0,MIN(144,MIN(available,bounds.size.height-inset.top-inset.bottom)-24));
+        CGFloat stickX=MAX(inset.left+stickSize/2+12,inset.left+available*.14);
+        CGFloat stickY=MIN(bounds.size.height*.78,bounds.size.height-inset.bottom-stickSize/2-12);
+        self.joystick.frame=CGRectMake(stickX-stickSize/2,stickY-stickSize/2,stickSize,stickSize);
         for (unsigned i=0;i<self.inputButtons.count;i++) {
+            if (i<4) {
+                hades_display_rect button;
+                if (hades_action_button_layout(bounds.size.width,bounds.size.height,
+                    inset.left,inset.top,inset.right,inset.bottom,i,&button)) {
+                    fprintf(stderr,"[Hades-iOS] Insufficient safe area for enlarged action buttons\n");
+                    abort();
+                }
+                self.inputButtons[i].frame=CGRectMake(button.x,button.y,button.width,button.height);
+                self.inputButtons[i].layer.cornerRadius=button.width/2;
+                continue;
+            }
             CGFloat x=inset.left+available*positions[i][0];
             x=MAX(inset.left+28,MIN(bounds.size.width-inset.right-28,x));
             CGFloat y=MAX(inset.top+28,MIN(bounds.size.height-inset.bottom-28,bounds.size.height*positions[i][1]));
+            if (i==5)
+                y=MAX(y,inset.top+72);
             self.inputButtons[i].frame=CGRectMake(x-26,y-26,52,52);
         }
+        self.fpsLabel.frame=CGRectMake(bounds.size.width-inset.right-112,inset.top+4,104,44);
+        CGFloat monitorWidth=MIN(320,available-24);
+        CGFloat monitorHeight=MIN(220,bounds.size.height-inset.top-inset.bottom-128);
+        self.systemMonitor.frame=CGRectMake(inset.left+(available-monitorWidth)/2,
+            inset.top+64,monitorWidth,monitorHeight);
+        self.monitorClose.frame=CGRectMake(8,0,monitorWidth-16,44);
+        self.monitorText.frame=CGRectMake(8,44,monitorWidth-16,monitorHeight-48);
         self.diagnosticButton.frame=CGRectMake(bounds.size.width/2-32,
             bounds.size.height-inset.bottom-40,64,32);
+        if (!self.actionHitAreaChecked && self.inputConfigured && !self.gameContainer.hidden
+            && bounds.size.width>bounds.size.height) {
+            const CGFloat samples[13][2]={{.5,.5},{.1,.5},{.9,.5},{.5,.1},{.5,.9},
+                {.2,.2},{.8,.2},{.2,.8},{.8,.8},{0,0},{1,0},{0,1},{1,1}};
+            unsigned circleHits=0,cornerRejects=0;
+            for (unsigned i=0;i<4;i++) {
+                UIButton *button=self.inputButtons[i];
+                for (unsigned j=0;j<13;j++) {
+                    CGPoint point=CGPointMake(button.bounds.origin.x+button.bounds.size.width*samples[j][0],
+                        button.bounds.origin.y+button.bounds.size.height*samples[j][1]);
+                    UIView *hit=[self.gameContainer hitTest:[button convertPoint:point toView:self.gameContainer]
+                        withEvent:nil];
+                    if (j<9)
+                        circleHits+=hit==button;
+                    else
+                        cornerRejects+=hit!=button;
+                }
+            }
+            self.actionHitAreaChecked=YES;
+            fprintf(stderr,"[Hades-iOS] ACTION_CIRCLE_HIT_TEST circle=%u/36 transparent-corners=%u/16 status=%s; UIKit dispatch only, not physical touch or guest-action proof\n",
+                circleHits,cornerRejects,circleHits==36 && cornerRejects==16 ? "passed" : "failed");
+        }
     }
 #endif
 }
@@ -184,6 +426,7 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
     [self.view addSubview:self.gameContainer];
     self.surface.translatesAutoresizingMaskIntoConstraints=YES;
     [self.gameContainer addSubview:self.surface];
+    [self.gameContainer addSubview:self.joystick];
     for (UIButton *button in self.inputButtons) {
         [(UIStackView *)button.superview removeArrangedSubview:button];
         [button removeFromSuperview];
@@ -191,6 +434,10 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
         button.backgroundColor=[UIColor.blackColor colorWithAlphaComponent:.5];
         button.layer.cornerRadius=26;
         button.tintColor=UIColor.whiteColor;
+        if (button.tag<=3) {
+            ((HadesActionButton *)button).circularHitArea=YES;
+            button.titleLabel.font=[UIFont systemFontOfSize:24 weight:UIFontWeightSemibold];
+        }
         [self.gameContainer addSubview:button];
     }
     self.diagnosticButton=[UIButton buttonWithType:UIButtonTypeSystem];
@@ -198,7 +445,52 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
     self.diagnosticButton.backgroundColor=[UIColor.blackColor colorWithAlphaComponent:.5];
     self.diagnosticButton.tintColor=UIColor.whiteColor;
     [self.diagnosticButton addTarget:self action:@selector(showDiagnostics) forControlEvents:UIControlEventTouchUpInside];
+    [self.haptics bindActivation:self.diagnosticButton];
     [self.gameContainer addSubview:self.diagnosticButton];
+    self.fpsLabel=[UILabel new];
+    self.fpsLabel.font=[UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightSemibold];
+    self.fpsLabel.textColor=UIColor.whiteColor;
+    self.fpsLabel.textAlignment=NSTextAlignmentCenter;
+    self.fpsLabel.backgroundColor=[UIColor.blackColor colorWithAlphaComponent:.55];
+    self.fpsLabel.layer.cornerRadius=6;
+    self.fpsLabel.layer.masksToBounds=YES;
+    self.fpsLabel.userInteractionEnabled=YES;
+    self.fpsLabel.accessibilityIdentifier=@"hades-fps";
+    self.fpsLabel.accessibilityLabel=@"游戏帧率";
+    self.fpsLabel.accessibilityTraits=UIAccessibilityTraitButton;
+    self.fpsLabel.accessibilityHint=@"轻点展开或关闭系统监控；帧率为呈现提交速率，不是屏幕刷新率";
+    self.fpsLabel.accessibilityValue=@"监控已关闭";
+    [self.fpsLabel addGestureRecognizer:[[UITapGestureRecognizer alloc]
+        initWithTarget:self action:@selector(toggleSystemMonitor)]];
+    [self.gameContainer addSubview:self.fpsLabel];
+    self.systemMonitor=[UIView new];
+    self.systemMonitor.backgroundColor=[UIColor.blackColor colorWithAlphaComponent:.8];
+    self.systemMonitor.layer.cornerRadius=10;
+    self.systemMonitor.hidden=YES;
+    self.systemMonitor.accessibilityIdentifier=@"hades-system-monitor";
+    self.monitorClose=[UIButton buttonWithType:UIButtonTypeSystem];
+    [self.monitorClose setTitle:@"系统监控 · 点击关闭 ×" forState:UIControlStateNormal];
+    self.monitorClose.tintColor=UIColor.whiteColor;
+    self.monitorClose.accessibilityLabel=@"关闭系统监控";
+    [self.monitorClose addTarget:self action:@selector(toggleSystemMonitor) forControlEvents:UIControlEventTouchUpInside];
+    [self.systemMonitor addSubview:self.monitorClose];
+    self.monitorText=[UITextView new];
+    self.monitorText.editable=NO;
+    self.monitorText.selectable=NO;
+    self.monitorText.backgroundColor=UIColor.clearColor;
+    self.monitorText.textColor=UIColor.whiteColor;
+    self.monitorText.font=[UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightRegular];
+    self.monitorText.textContainerInset=UIEdgeInsetsZero;
+    self.monitorText.accessibilityIdentifier=@"hades-system-monitor-values";
+    [self.systemMonitor addSubview:self.monitorText];
+    [self.gameContainer insertSubview:self.systemMonitor belowSubview:self.joystick];
+    [self resetFrameRate];
+    __weak HadesViewController *weakSelf=self;
+    self.fpsTimer=[NSTimer timerWithTimeInterval:.5 repeats:YES block:^(NSTimer *timer) {
+        (void)timer;
+        [weakSelf updateFrameRate];
+    }];
+    [NSRunLoop.mainRunLoop addTimer:self.fpsTimer forMode:NSRunLoopCommonModes];
     [self setNeedsUpdateOfSupportedInterfaceOrientations];
     UIWindowSceneGeometryPreferencesIOS *geometry=[[UIWindowSceneGeometryPreferencesIOS alloc]
         initWithInterfaceOrientations:UIInterfaceOrientationMaskLandscape];
@@ -213,27 +505,32 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
     uint64_t buttons=0;
     for (UIButton *button in self.inputButtons)
         if (button.selected) buttons|=1ull<<button.tag;
-    int32_t x=(buttons&(1u<<14) ? 32767 : 0)-(buttons&(1u<<12) ? 32767 : 0);
-    int32_t y=(buttons&(1u<<13) ? 32767 : 0)-(buttons&(1u<<15) ? 32767 : 0);
-    if (hades_ipc_publish_input(buttons&~0xf000ull,x,y))
+    if (hades_ipc_publish_input(buttons,self.joystick.stick.x,self.joystick.stick.y))
         fprintf(stderr,"[Hades-iOS] Cannot publish touch-controller state\n");
 }
 - (void)controlDown:(UIButton *)button { button.selected=YES;[self publishControls]; }
 - (void)controlUp:(UIButton *)button { button.selected=NO;[self publishControls]; }
 - (void)releaseControls {
-    for (UIButton *button in self.inputButtons)
-        button.selected=NO;
+    for (UIButton *button in self.inputButtons) {
+        if ([button isKindOfClass:HadesActionButton.class])
+            [(HadesActionButton *)button reset];
+        else
+            button.selected=NO;
+    }
+    [self.joystick reset];
     if (self.inputConfigured)
         [self publishControls];
 }
 - (void)showDiagnostics {
     [self releaseControls];
+    [self resetFrameRate];
     self.gameContainer.hidden=YES;
     self.diagnosticStack.hidden=NO;
     [self refreshLog];
 }
 - (void)showGameSurface {
     if (self.gameContainer) {
+        [self resetFrameRate];
         self.diagnosticStack.hidden=YES;
         self.gameContainer.hidden=NO;
         [self.view setNeedsLayout];
@@ -244,11 +541,13 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
     [button setTitle:title forState:UIControlStateNormal];
     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
     [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    [self.haptics bindActivation:button];
     return button;
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    self.haptics=[HadesHaptics new];
     self.view.backgroundColor = UIColor.systemBackgroundColor;
     UILabel *title = [UILabel new];
     title.text = @"Hades — 真机移植验证";
@@ -277,21 +576,32 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
     self.surfaceHeight=[self.surface.heightAnchor constraintEqualToConstant:120];
     self.surfaceHeight.active=YES;
     [views addObject:self.surface];
-    NSArray<NSString *> *labels=@[@"上",@"下",@"左",@"右",@"A",@"B",@"X",@"Y",@"L",@"R",@"ZL",@"+"];
-    const unsigned bits[]={13,15,12,14,0,1,2,3,6,7,8,10};
+    self.joystick=[[HadesJoystick alloc] initWithFrame:CGRectZero];
+    self.joystick.enabled=NO;
+    [self.joystick addTarget:self action:@selector(publishControls) forControlEvents:UIControlEventValueChanged];
+    NSArray<NSString *> *labels=@[@"A",@"B",@"X",@"Y",@"L",@"R",@"ZL",@"+"];
+    const unsigned bits[]={0,1,2,3,6,7,8,10};
     NSMutableArray<UIButton *> *controls=[NSMutableArray new];
-    for (unsigned row=0;row<3;row++) {
+    for (unsigned row=0;row<2;row++) {
         NSMutableArray *items=[NSMutableArray new];
         for (unsigned column=0;column<4;column++) {
             unsigned index=row*4+column;
-            UIButton *control=[UIButton buttonWithType:UIButtonTypeSystem];
+            UIButton *control=index<4 ? [[HadesActionButton alloc] initWithFrame:CGRectZero]
+                                      : [UIButton buttonWithType:UIButtonTypeSystem];
+            if (index<4)
+                [control setTitleColor:UIColor.systemBlueColor forState:UIControlStateNormal];
             [control setTitle:labels[index] forState:UIControlStateNormal];
             control.tag=bits[index];
             control.enabled=NO;
             control.accessibilityIdentifier=[@"hades-input-" stringByAppendingString:labels[index]];
             [control addTarget:self action:@selector(controlDown:) forControlEvents:UIControlEventTouchDown];
+            [self.haptics bindPress:control];
             [control addTarget:self action:@selector(controlUp:)
                 forControlEvents:UIControlEventTouchUpInside|UIControlEventTouchUpOutside|UIControlEventTouchCancel];
+            if (index<4) {
+                [control addTarget:self action:@selector(controlDown:) forControlEvents:UIControlEventTouchDragEnter];
+                [control addTarget:self action:@selector(controlUp:) forControlEvents:UIControlEventTouchDragExit];
+            }
             [items addObject:control];[controls addObject:control];
         }
         UIStackView *rowView=[[UIStackView alloc] initWithArrangedSubviews:items];
@@ -380,8 +690,8 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
         [self installGameLayout];
         [self.view layoutIfNeeded];
         CAMetalLayer *layer=(CAMetalLayer *)self.surface.layer;
-        layer.contentsScale=1280.0/self.surface.bounds.size.width;
-        layer.drawableSize=CGSizeMake(1280,720);
+        layer.contentsScale=(CGFloat)renderWidth/self.surface.bounds.size.width;
+        layer.drawableSize=CGSizeMake(renderWidth,renderHeight);
         if ([NSBundle.mainBundle.infoDictionary[@"HadesVulkanPixelCaptureProbe"] boolValue]) {
             NSURL *documents=[NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory
                 inDomains:NSUserDomainMask].firstObject;
@@ -411,8 +721,10 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
             return;
         }
         self.inputConfigured=YES;
+        self.joystick.enabled=YES;
         for (UIButton *button in self.inputButtons)
             button.enabled=YES;
+        [self.view setNeedsLayout];
     }
 #endif
     self.running = YES;
@@ -596,6 +908,15 @@ int main(int argc, char **argv) {
             return 2;
         }
 #ifdef HADES_VULKAN_HOST
+        NSString *resolution=NSBundle.mainBundle.infoDictionary[@"HadesRenderResolution"];
+        if (![resolution isKindOfClass:NSString.class]
+            || strcmp(resolution.UTF8String,hades_render_resolution)
+            || hades_display_extent(resolution.UTF8String,&renderWidth,&renderHeight)) {
+            fprintf(stderr,"[Hades-iOS] Missing, invalid, or embedded-profile-mismatched render resolution; no launch\n");
+            return 2;
+        }
+        fprintf(stderr,"[Hades-iOS] RENDER_RESOLUTION requested=%ux%u; guest render targets and frame rate require verification\n",
+                renderWidth,renderHeight);
         NSString *bindingMode=NSBundle.mainBundle.infoDictionary[@"HadesVulkanBindingMode"];
         if (![bindingMode isKindOfClass:NSString.class]
             || (![bindingMode isEqual:@"direct"] && ![bindingMode isEqual:@"argument-buffers"])) {

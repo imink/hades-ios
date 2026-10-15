@@ -406,6 +406,213 @@ unverified. The log also records the existing foreground-only abort on backgroun
 background suspension is still unimplemented. Private logs, the signed-artifact
 verification and the user's feedback are retained locally.
 
+### Version 23 analog left stick
+
+A fixed-base analog joystick replaces the four left-side direction buttons;
+the eight action/shoulder buttons remain. It supports continuous direction and
+magnitude, circular clamping and a 12% radial dead zone. Upward dragging publishes
+positive Y, without adding D-pad bits. It tracks the original finger outside the
+base and resets on release, cancellation or disabling without releasing
+independently held action buttons. Opening diagnostics or deactivating the app
+still releases all controls under the existing policy. Layout respects safe areas
+and moves ZL rightward to avoid overlapping the stick.
+
+V22 directory ordering and graphics settings are unchanged. The new joystick
+header is included in source receipts and frozen Xcode projects. Core/joystick
+and iOS packaging regressions passed; the Apple-signed build's 15 AOT sections,
+291 resources and 43 source files were verified. It was installed with user
+authorization, its new startup receipt confirmed and all 10 save hashes preserved.
+The user confirmed actual-device movement, stopping on release and simultaneous
+action-button input. This does not establish layout or interaction on other devices.
+
+### Version 24 top-right FPS
+
+A non-interactive FPS label sits at the top right, with R moved slightly downward
+to avoid overlap. It samples the existing thread-safe Vulkan presentation counter
+against a monotonic clock over windows of at least one second, checked every half
+second. The value uses actual elapsed time, not the panel refresh rate, and is not
+clamped to 60. No submissions produce 0; the first window shows `FPS --`.
+Diagnostics, app deactivation and counter resets restart sampling.
+This measures successful/SUBOPTIMAL presentation submissions, not GPU completion
+or verified per-frame scanout.
+
+The user selected the verified 1280x720 baseline. Runtime code, graphics settings
+and rendering resources remain unchanged; no GPU readback or queue waits are added.
+1080p has 2.25 times the pixels of 720p and requires separate verification of guest
+render targets, swapchain dimensions, device frame rate, memory and stability.
+Increasing drawable size alone does not establish native 1080p or stable 60 FPS.
+FPS/joystick and package/project regressions passed; the signed build's 15 AOT
+sections, 291 resources and 44 sources were verified. It was installed with user
+authorization, its new receipt confirmed and all 10 save hashes preserved.
+User verification of the top-right display and control layout remains pending.
+
+### Version 25 opt-in native 1080p experiment
+
+Increasing only the host drawable to 1920x1080 left the game's swapchains,
+framebuffers and scene passes at 1280x720, producing SUBOPTIMAL presents.
+Actual main-module analysis identified the bootstrap's packed window dimensions:
+`mov x9,#1280` at `0x248238`, `movk x9,#720,lsl #32` at `0x248240`,
+subsequently stored into the initial and current window descriptors.
+`display.py` checks the specific main build ID, both constants and both stores
+before adjusting the constants to 1920/1080 in **private copies** of the verified
+AOT images. This is an intentional graphics behavior change, not ABI equivalence;
+the original extraction, verified ABI baseline, NSP and save data are unchanged.
+No docked mode, Switch clocks, forced driver extents or CPU JIT are introduced.
+
+Both `link_modules.py` and `package_ios.py` accept `--render-resolution 1080p`;
+their default remains `720p`. The generated manifest identifies the embedded
+preset, and the iOS `HadesRenderResolution` must match it. The same dimensions
+are used at initial launch and subsequent layouts. A 720p rebuild or the retained
+v24 signed package provides the rollback path. Package receipts track the actual
+embedded image hashes, and signing verification uses those experimental images.
+
+The Mac isolated-save comparison reached at least 9600 successful presentations
+with zero logged SUBOPTIMAL presents. Actual swapchains, main scene framebuffers,
+later scene passes and native pixel captures were all 1920x1080; the captured
+house scene retained its colored materials. Small lookup targets remain unchanged.
+The v25 iPhone build is Apple-signed, with 15 AOT sections, 291 resources and
+46 frozen source files verified. It was installed with explicit authorization
+after two stopped-process checks and a full save backup; all 10 save hashes
+remained identical. The device launch receipt and 1080p request were confirmed.
+The user subsequently requested a return to 720p. After another full backup and
+two stopped-process checks, the retained Apple-signed v24 was installed without
+uninstalling; all 10 current save hashes were preserved, and a fresh v24 receipt
+was confirmed after the v25 launch. **That rollback restored 1280x720 v24 with
+joystick and FPS.** No reason for rollback or measured device FPS was reported;
+native iPhone 1080p scene correctness, performance and stability remain unverified.
+1080p is not a promise of 60 FPS, nor an increase in the original asset detail.
+
+### Version 27 opt-in widescreen (installed, user confirms playable)
+
+`--render-resolution wide-720p` selects 1560x720 for the current iPhone 15 Pro Max,
+about 22% more pixels than the unchanged default `720p` preset. Following D2R's
+separation of world viewport and UI, this uses Hades-specific evidence, not D2R
+addresses. The Metal view follows the render aspect and fills this phone's landscape
+bounds; mismatched screen ratios retain aspect-fit behavior.
+
+A width-only negative control still drew the game's decorative pillars. Exact
+build-ID/original-byte checks now guard private AOT changes to the bootstrap width,
+shared virtual width and default view width. The 2340x1080 virtual canvas reveals
+additional world at the sides without stretching central geometry. Original NSP,
+ExeFS, ABI baseline and RomFS archive remain unchanged; executable code is not
+modified at runtime.
+
+31 private read-only UI overlays center absolute native-GUI positions, preserve
+attached coordinates and expand full-width backgrounds. NX same-name inheritance
+overrides the base file rather than forming a local cycle. Each source is checked
+for size and SHA-256 on open; file sizes, directory sizes and partial reads expose
+the transformed content consistently. The Lua canvas coordinates enter
+`SaveIgnores`, because `Main.Load` otherwise restores old saved globals over the
+new display configuration; experimental coordinates are not persisted to saves.
+
+An actual Mac run using a separate old-save copy reached at least 9600 successful
+presents with zero SUBOPTIMAL. Captured 1560x720 world pixels show the former pillar
+areas; the location banner, pause and settings menus are centered. The Apple-signed
+candidate has 15 verified AOT sections, 291 resources and 46 frozen sources.
+The user authorized USB installation. An initial live-process check stopped the
+operation; after the user saved and closed the entire app, two new stopped-process
+checks and a complete backup preceded the same-bundle update. All 10 current save
+hashes matched afterward; only then was v27 launched and its fresh receipt confirmed.
+There was no uninstall or forced termination; the v24 rollback package is retained.
+The user subsequently confirmed that v27 is playable on the phone. This is a
+user-reported gameplay result, not independent device pixel verification or a
+stable 60 FPS measurement. Full combat and long-run stability remain unverified.
+Fixed-aspect artwork and transitions are not claimed to be newly authored ultrawide assets.
+
+### Version 28 FPS monitor and larger action buttons (installed, interaction pending)
+
+Tapping FPS toggles a nonmodal monitor, also dismissible through its header.
+It does not pause the guest, leave the game surface or release held controls.
+While visible and foregrounded, it samples once per second: submitted-present FPS,
+current-process CPU, physical footprint, resident memory, Metal allocations,
+process-available memory from `os_proc_available_memory()`, and system thermal state.
+CPU is the delta of cumulative `getrusage(RUSAGE_SELF)` user/system CPU time divided
+by elapsed time; 100% means one core, and multicore usage may exceed 100%.
+Initial samples show a waiting state; failures display unavailable and log errors.
+These are not whole-device CPU or free RAM, thermal state is not a Celsius reading,
+overlapping memory accounts must not be summed, and Metal allocation is not GPU utilization.
+
+A/B/X/Y grow from 52 pt to 72 pt with larger labels, preserving the diamond mapping.
+Their rectangular hit areas do not overlap and remain inside the safe area.
+The other four buttons and joystick are unchanged; FPS has a 44 pt-high tap target.
+The v27 widescreen preset is retained with identical guest-image and resource hashes.
+The Apple-signed, source-frozen v28 was installed over USB with explicit permission,
+two stopped-process checks and a full backup. All 10 current save hashes matched
+after the same-bundle update, followed by launch and fresh-receipt confirmation;
+no uninstall or forced termination. Monitor toggling/values and enlarged-button
+interaction still need device feedback; successful installation does not establish those results.
+
+### Version 29 compact circular controls and vignette candidate (installed, touch issue reported)
+
+A/B/X/Y retain their 72 pt diameter and mapping. Diamond-axis spacing decreases
+from 80 to 56 pt, lowering the cluster center by 30 pt with a 6 pt bottom safe-area
+margin. Adjacent circles remain about 79.2 pt apart. Hit testing rejects the
+transparent rectangular corners; overlapping bounding boxes do not steal adjacent
+circle taps. This applies only to these four in-game controls, not the diagnostic
+page, other buttons or joystick.
+
+The widescreen candidate also adds horizontal `ScreenWidth / 1920` scaling to the
+existing `CreateVignette` object, guarded by original-source hash and unique anchor.
+Vertical scale, opacity, blending and original resources are unchanged; read-only
+overlays increase from 31 to 32. Before/after Mac runs from independent copies of
+the same phone backup each reached at least 7200 presents without SUBOPTIMAL, with
+per-pass captures retained. However, that backup loads the House rather than the
+reported combat scene: **the old-aspect dark rectangle is not yet reproduced or
+proven fixed**. A newer pre-update backup loads the weapon courtyard, which also
+does not reproduce the reported combat scene. Apple-signed v29 was installed with
+fresh user authorization, two stopped-process checks, a full backup, identical
+hashes for all 10 save files, and fresh launch-receipt confirmation. No uninstall
+or forced termination. The user subsequently reported that only the letter areas
+responded: passing geometry tests did not establish correct whole-circle physical
+touch. Combat-mask results remain unconfirmed.
+
+### Version 30 whole-circle touch delivery and active appearance (device confirmed)
+
+The four explicitly allocated custom UIButtons own in-game hit testing and the
+touch lifecycle rather than relying on system-button content tracking. Letters
+and other circle positions share press/release dispatch. A press brightens the
+whole circle, thickens its border and reverses the label color. Dragging out
+releases, re-entering restores, and release/cancellation/disable/diagnostic
+switching clear held state. The v29 diameter, position and spacing are retained;
+other buttons, joystick, guest images, original resources and widescreen overlays
+are unchanged. **No haptics were added.**
+
+The old v29 implementation passed a 20-point Mac UIKit hit test; this does not
+reproduce the phone's letter-only symptom or prove a geometry bug. New O0/O2
+regressions use actual Mac Catalyst UIKit to check 36 circle positions, input
+bits, rendered active pixels, corner rejection, exit/re-entry, cancellation,
+disable, a second finger and simultaneous buttons. Touch phases use test doubles,
+not physical touchscreen input. All 81 regressions and iPhoneOS compilation pass.
+The first enabled landscape layout logs 36 interior/16 corner routing checks,
+and at most the first 16 real circle presses log local coordinates and selected
+state.
+
+Version 30 was installed over USB with user authorization, two stopped-process
+checks and a complete backup. All 10 save-file paths and hashes were unchanged,
+and the fresh launch receipt matched the signed package. No uninstall or forced
+termination was used. The user confirmed that all four circles trigger actions
+away from their letters and that press highlighting works. This confirmation
+does not establish the separate combat-mask fix or long-run stability.
+
+### Version 31 native button haptics (installed, physical feedback pending)
+
+After user approval, the host uses a shared, lazily created
+`UIImpactFeedbackGenerator` with `UIImpactFeedbackStyleLight`. The eight gameplay
+buttons request one impact on touch-down; dragging out/back, holding, releasing
+or cancelling does not request another. The joystick has no haptic binding.
+FPS/monitor toggles, the log button and diagnostic-page buttons request one
+impact on confirmed activation. Programmatic log refreshes do not vibrate.
+This covers host controls, not guest-rendered menus or guest rumble. Requests
+are foreground-only, and iOS settings/hardware can suppress physical feedback.
+
+O0/O2 UIKit tests count generator-spy calls alongside the existing whole-circle
+input/active-pixel regressions; they do not measure physical vibration. The
+Apple-signed package has 15 verified AOT sections, 291 resources and 50 frozen
+sources. Guest images, resources and display overlays match v30. Following
+authorization, USB update, two stopped-process checks and a complete backup,
+all 10 save-file hashes remained identical and the fresh v31 receipt matched.
+The user has not yet tested the physical haptic response.
+
 Version 9 logs a `build` number and `receipt` derived from code/header, five
 rewritten-image, binding and pinned-framework hashes, independent of output paths.
 This identifies the device test artifact, not Apple signing, pixel correctness or gameplay.

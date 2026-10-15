@@ -162,7 +162,7 @@ def npdm_thread_policy(npdm):
             "core_mask": ((1 << (core_hi - core_lo + 1)) - 1) << core_lo}
 
 
-def generate_artifacts(root, output, use_host_services=False, use_vulkan=False):
+def generate_artifacts(root, output, use_host_services=False, use_vulkan=False, render_resolution="720p"):
     if use_vulkan and not use_host_services:
         raise FormatError("Vulkan profile requires explicit host services")
     modules, records, counts = build_plan(root, use_host_services, use_vulkan)
@@ -171,6 +171,13 @@ def generate_artifacts(root, output, use_host_services=False, use_vulkan=False):
     if output.exists():
         raise FormatError("Native probe output must be a new directory")
     output.mkdir(mode=0o700, parents=True)
+    if render_resolution != "720p" and not use_vulkan:
+        raise FormatError("Experimental resolutions require the explicit Vulkan graphics profile")
+    from display import display_images, ui_overlays
+    images, display = display_images(root, output, render_resolution, [m["name"] for m in modules])
+    overlays = ui_overlays(root, render_resolution)
+    display["ui_overlays"] = [{**{key: value for key, value in entry.items() if key != "data"},
+                               "bytes": len(entry["data"])} for entry in overlays]
     relocation_bytes = b"".join(struct.pack("<QQiI", offset, value, target, index)
                                 for index, offset, target, value in records)
     (output / "relocations.bin").write_bytes(relocation_bytes)
@@ -181,7 +188,21 @@ def generate_artifacts(root, output, use_host_services=False, use_vulkan=False):
     if (not isinstance(display_version, str) or not display_version
             or any(not 32 <= ord(c) <= 126 for c in display_version) or len(display_version) >= 16):
         raise FormatError("Invalid extracted application display version")
-    lines = ['#include "core.h"',
+    lines = ['#include "core.h"', '#include "host.h"']
+    for index, entry in enumerate(overlays):
+        lines.append(f"static const unsigned char hades_ui_data_{index}[] = {{")
+        for offset in range(0, len(entry["data"]), 32):
+            lines.append(",".join(str(value) for value in entry["data"][offset:offset + 32]) + ",")
+        lines.append("};")
+    lines.append("const hades_ui_overlay hades_ui_overlays[] = {")
+    for index, entry in enumerate(overlays):
+        digest = ",".join(str(value) for value in bytes.fromhex(entry["source_sha256"]))
+        lines.append("{%s,%d,%d,hades_ui_data_%d,{%s}}," % (
+            json.dumps(entry["path"]), entry["source_size"], len(entry["data"]), index, digest))
+    if not overlays:
+        lines.append("{0},")
+    lines += ["};", f"const unsigned hades_ui_overlay_count = {len(overlays)};",
+             "const char hades_render_resolution[] = " + json.dumps(render_resolution) + ";",
              "const char hades_display_version[16] = " + json.dumps(display_version) + ";",
              "const hades_spec hades_specs[] = {"]
     for module in modules:
@@ -249,7 +270,7 @@ def generate_artifacts(root, output, use_host_services=False, use_vulkan=False):
     (output / "manifest.c").write_text("\n".join(lines) + "\n")
     assembly = output / "images.S"
     generation = subprocess.run([sys.executable, str(REPO / "dm/ios/tools/gen_embed.py"),
-                                str(root / "build/abi"), str(assembly), *[m["name"] for m in modules]],
+                                str(images), str(assembly), *[m["name"] for m in modules]],
                                capture_output=True, text=True)
     if generation.returncode:
         raise FormatError("Native embedding generation failed")
@@ -262,14 +283,15 @@ def generate_artifacts(root, output, use_host_services=False, use_vulkan=False):
                "host_services": use_host_services,
                "host_binding_names": list(host_bindings(use_vulkan)) if use_host_services else [],
                "vulkan_profile": use_vulkan,
+               "embedded_images_directory": str(images), "render_resolution": display,
                "host_relocation_count": sum(record[2] < -1 for record in records),
                "modules": [m["name"] for m in modules], "constructors_executed": False,
                "ios_runtime_verified": False})
     return flags
 
 
-def generate_probe(root, output, use_host_services=False, moltenvk=None):
-    flags = generate_artifacts(root, output, use_host_services, moltenvk is not None)
+def generate_probe(root, output, use_host_services=False, moltenvk=None, render_resolution="720p"):
+    flags = generate_artifacts(root, output, use_host_services, moltenvk is not None, render_resolution)
     if moltenvk:
         from vulkan_dispatch import framework, generate
         include, library = framework(outside_git(moltenvk), "macos")
@@ -304,9 +326,10 @@ def main():
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--host-services", action="store_true")
     parser.add_argument("--moltenvk", type=Path, help="Explicit verified local Vulkan/Metal static-framework root")
+    parser.add_argument("--render-resolution", choices=("720p", "1080p", "wide-720p"), default="720p")
     args = parser.parse_args()
     try:
-        generate_probe(outside_git(args.work), args.out, args.host_services, args.moltenvk)
+        generate_probe(outside_git(args.work), args.out, args.host_services, args.moltenvk, args.render_resolution)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"Hades native core failed: {error}", file=sys.stderr)
         return 2

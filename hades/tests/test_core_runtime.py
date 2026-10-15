@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import plistlib
 import shutil
 import struct
 import subprocess
@@ -21,6 +22,55 @@ def symbol(name, defined=True, value=24, binding=1, visibility=0, section=1):
 
 
 class CoreRuntimeTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("xcrun") and
+        Path("/System/iOSSupport/System/Library/Frameworks/UIKit.framework").is_dir(),
+        "Requires existing Mac Catalyst UIKit runtime")
+    def test_ios_circle_controls_uikit_touch_delivery_and_active_pixels(self):
+        sdk = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip()
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "HadesControlsProbe.app"
+            executable = app / "Contents/MacOS/HadesControlsProbe"
+            executable.parent.mkdir(parents=True)
+            metadata = {
+                "CFBundleIdentifier": "local.hades.controlsprobe",
+                "CFBundleExecutable": "HadesControlsProbe",
+                "CFBundleName": "HadesControlsProbe", "CFBundlePackageType": "APPL",
+                "LSUIElement": True, "LSRequiresIPhoneOS": True, "UIDeviceFamily": [2],
+                "CFBundleSupportedPlatforms": ["MacOSX"], "LSMinimumSystemVersion": "13.0",
+                "UIApplicationSceneManifest": {"UIApplicationSupportsMultipleScenes": False,
+                    "UISceneConfigurations": {"UIWindowSceneSessionRoleApplication": [{
+                        "UISceneClassName": "UIWindowScene", "UISceneConfigurationName": "ControlsProbe",
+                        "UISceneDelegateClassName": "HadesControlsProbeSceneDelegate"}]}}}
+            (app / "Contents/Info.plist").write_bytes(plistlib.dumps(metadata))
+            frameworks = sdk + "/System/iOSSupport/System/Library/Frameworks"
+            for optimization in ("-O0", "-O2"):
+                subprocess.run(["xcrun", "--sdk", "macosx", "clang",
+                    "-target", "arm64-apple-ios16.0-macabi", "-isysroot", sdk,
+                    "-iframework", frameworks, "-F", frameworks, "-fobjc-arc", "-fmodules",
+                    optimization, "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
+                    str(REPO / "hades/tests/ios_controls_probe.m"),
+                    "-framework", "UIKit", "-framework", "Foundation", "-framework", "QuartzCore",
+                    "-o", str(executable)], check=True)
+                subprocess.run(["codesign", "--force", "--sign", "-", str(app)],
+                    check=True, capture_output=True)
+                result = subprocess.run([str(executable)], check=True, capture_output=True,
+                    text=True, timeout=30)
+                self.assertIn("UIKIT_CIRCLE_HITS hits=36 misses=0", result.stdout)
+                self.assertIn("UIKIT_CIRCLE_INPUT_OK", result.stdout)
+                self.assertIn("UIKIT_HAPTICS_EVENTS_OK", result.stdout)
+
+    @unittest.skipUnless(shutil.which("xcrun"), "Requires existing Apple C compiler")
+    def test_ios_process_monitor_and_enlarged_action_targets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = str(Path(temporary) / "ios-monitor-controls")
+            for probe, marker in (("monitor_probe.c", "PROCESS_CPU_MONITOR_OK"),
+                                  ("controls_probe.c", "ACTION_BUTTON_LAYOUT_OK")):
+                for optimization in ("-O0", "-O2"):
+                    subprocess.run(["xcrun", "clang", "-std=c11", optimization, "-Wall", "-Wextra", "-Werror",
+                        str(REPO / "hades/tests" / probe), "-o", executable], check=True)
+                    result = subprocess.run([executable], check=True, capture_output=True, text=True, timeout=15)
+                    self.assertIn(marker, result.stdout)
+
     @unittest.skipUnless(shutil.which("xcrun"), "Requires existing Apple C compiler")
     def test_actual_self_memory_observation(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -31,6 +81,36 @@ class CoreRuntimeTests(unittest.TestCase):
                 result = subprocess.run([executable], check=True, capture_output=True, text=True, timeout=15)
                 self.assertIn("ACTUAL_SELF_MEMORY_ACCOUNTING_OK", result.stdout)
                 self.assertIn("overlapping accounts, do not sum", result.stderr)
+
+    @unittest.skipUnless(shutil.which("xcrun"), "Requires existing Apple C compiler")
+    def test_ios_analog_joystick_radial_dead_zone_and_clamping(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = str(Path(temporary) / "ios-joystick")
+            for optimization in ("-O0", "-O2"):
+                subprocess.run(["xcrun", "clang", "-std=c11", optimization, "-Wall", "-Wextra", "-Werror",
+                    str(REPO / "hades/tests/joystick_probe.c"), "-o", executable], check=True)
+                result = subprocess.run([executable], check=True, capture_output=True, text=True, timeout=15)
+                self.assertIn("IOS_ANALOG_JOYSTICK_OK", result.stdout)
+
+    @unittest.skipUnless(shutil.which("xcrun"), "Requires existing Apple C compiler")
+    def test_ios_present_fps_sampling_uses_elapsed_time_and_resets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = str(Path(temporary) / "ios-fps")
+            for optimization in ("-O0", "-O2"):
+                subprocess.run(["xcrun", "clang", "-std=c11", optimization, "-Wall", "-Wextra", "-Werror",
+                    str(REPO / "hades/tests/fps_probe.c"), "-o", executable], check=True)
+                result = subprocess.run([executable], check=True, capture_output=True, text=True, timeout=15)
+                self.assertIn("IOS_PRESENT_FPS_OK", result.stdout)
+
+    @unittest.skipUnless(shutil.which("xcrun"), "Requires existing Apple C compiler")
+    def test_display_extent_720p_baseline_and_1080p_preset(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = str(Path(temporary) / "display")
+            for optimization in ("-O0", "-O2"):
+                subprocess.run(["xcrun", "clang", "-std=c11", optimization, "-Wall", "-Wextra", "-Werror",
+                    str(REPO / "hades/tests/display_probe.c"), "-o", executable], check=True)
+                result = subprocess.run([executable], check=True, capture_output=True, text=True, timeout=15)
+                self.assertIn("DISPLAY_EXTENT_PRESETS_OK", result.stdout)
 
     @unittest.skipUnless(shutil.which("xcrun"), "Requires existing Apple C compiler")
     def test_ios_foreground_diagnostic_policy(self):
@@ -191,6 +271,8 @@ class CoreRuntimeTests(unittest.TestCase):
             romfs = root / "romfs"
             romfs.mkdir()
             (romfs / "Hello.txt").write_bytes(b"hello world")
+            (romfs / "Content").mkdir()
+            (romfs / "Content/Test.sjson").write_bytes(b"hello world")
             (romfs / "link").symlink_to(romfs / "Hello.txt")
             ordered = romfs / "Ordered"
             ordered.mkdir()

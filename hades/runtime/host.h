@@ -13,7 +13,17 @@ enum {
     HADES_HOST_COUNT
 };
 
-int hades_host_initialize(const char *romfs);
+typedef struct {
+    const char *path;
+    size_t source_size, size;
+    const unsigned char *data;
+    unsigned char source_digest[32];
+} hades_ui_overlay;
+extern const hades_ui_overlay hades_ui_overlays[];
+extern const unsigned hades_ui_overlay_count;
+
+int hades_host_initialize(const char *romfs, const char *render_resolution,
+                          const hades_ui_overlay *overlays, unsigned overlay_count);
 int hades_host_configure_user(const char *storage);
 int hades_host_shutdown(void);
 const void *hades_host_entrypoint(unsigned index);

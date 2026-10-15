@@ -230,7 +230,7 @@ int hades_run_core_probe(int argc, const char *const *argv) {
         if (!end || strcmp(end + 1, ".nrr"))
             return 2;
         *end = 0;
-        if (hades_host_initialize(root))
+        if (hades_host_initialize(root,hades_render_resolution,hades_ui_overlays,hades_ui_overlay_count))
             return 2;
         if (argc == 7 && hades_host_configure_user(argv[6]))
             return 2;
