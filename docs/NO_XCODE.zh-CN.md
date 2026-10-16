@@ -15,13 +15,15 @@ English: [NO_XCODE.md](NO_XCODE.md)
 
 ## 壳里有什么、没有什么
 
-壳从本仓库的[发布页](https://github.com/jhaizhou-ops/d2r-mobile/releases)下载。壳（`D2RMobile-shell.ipa`，约 3 MB）里只有我们自己的宿主程序、图标和两张随仓库公开的表。它**没有**：游戏程序、着色器、覆盖层、界面素材、任何从游戏文件生成的数据表。构建壳的脚本（`dm/ios/tools/shell_build.sh`）在最后会拿真实的游戏内容去壳里逐个文件搜一遍，搜到就不出壳。
+壳从本仓库的[发布页](https://github.com/jhaizhou-ops/d2r-mobile/releases)下载。发布页上有两份：`D2RMobile-shell-build-input.zip` 给 iOS 26 及以上，`D2RMobile-shell-ios18-build-input.zip` 给 iOS 18 – 25（[OLDER_SYSTEMS.zh-CN.md](OLDER_SYSTEMS.zh-CN.md)），按手机的系统挑一份，后面的步骤相同。壳（约 4 MB）里只有我们自己的宿主程序、图标和两张随仓库公开的表。它**没有**：游戏程序、着色器、覆盖层、界面素材、任何从游戏文件生成的数据表。构建壳的脚本（`dm/ios/tools/shell_build.sh`）在最后会拿真实的游戏内容去壳里逐个文件搜一遍，搜到就不出壳。
 
-壳自己起不来——它启动时会告诉你「这个安装包里还没有游戏程序」。
+**壳是做安装包的原料，不能直接装来玩**（所以它是 `.zip`，不是 `.ipa`）。把它改名直接装上去，App 启动时会弹框「这个安装包还不能玩」，列出缺的内容，告诉你回到下面第一步；不会进游戏。
+
+**每次换新版本，都要用新版的壳和同一版本的源码重新做一遍第一步**，再装新做出来的安装包。手机上第三步放的资源档案和版本无关，不用重拷。
 
 ## 你需要准备的
 
-- 你自己购买的游戏的文件：Switch 版 3.3.94012 的 `ExeFS` 与 `RomFS`，见 [GAME_FILES.zh-CN.md](GAME_FILES.zh-CN.md)
+- 你自己购买的游戏的文件：Switch 版 1.0.34.0（对应 PC 版 3.3.94012）的 `ExeFS` 与 `RomFS`，见 [GAME_FILES.zh-CN.md](GAME_FILES.zh-CN.md)
 - 这个仓库的源码，版本要与壳是同一个发布版本（工具会核对，不一致会直说）
 - Python 3.9 以上，以及这几个包：`python3 -m pip install pillow numpy lz4 capstone unicorn`
 - 一个 C 编译器（`clang`；Windows 上装 LLVM 即可）、.NET SDK。**不需要**苹果的 Metal 着色器编译器：有它（装了 Xcode 的 Mac）就在电脑上把着色器编成库，没有就走手机上现编
@@ -41,7 +43,7 @@ English: [NO_XCODE.md](NO_XCODE.md)
 ## 第一步：把游戏内容做进壳
 
 ```
-python3 dm/tools/d2rm_pack.py <D2RMobile-shell.ipa> <你的游戏文件目录> <输出.ipa>
+python3 dm/tools/d2rm_pack.py <D2RMobile-shell-build-input.zip> <你的游戏文件目录> <输出.ipa>
 ```
 
 `<你的游戏文件目录>` 是含 `ExeFS/` 与 `RomFS/` 的那一层。它依次：改写游戏程序并写成一个动态库 → 从游戏文件生成界面素材与几张数据表 → 生成覆盖层 → 把游戏的着色器翻译成 Metal → 照壳里的清单核对一项不缺 → 写出新的安装包（约 130 MB）。第一次约十几分钟，主要花在翻译着色器上；每一步做过就跳过。
@@ -69,6 +71,24 @@ python3 dm/tools/d2rm_pack.py <D2RMobile-shell.ipa> <你的游戏文件目录> <
 - 只需要做一次。系统更新、重装 App、或系统清理了缓存之后，会再做一次。
 - 可以切到后台或关掉；回来从头数一遍，已经编过的每个只要不到一毫秒，等于接着做。
 - 这几分钟手机会发热，建议插着电、别套太厚的壳。
+
+## 老机型（A16 及更早的芯片）
+
+iPhone 14 系列、iPhone 15 / 15 Plus 以及更早的机型，要多做一份贴图包，并在第一步里带上它。完整说明见 [LEGACY_DEVICES.zh-CN.md](LEGACY_DEVICES.zh-CN.md)，这条路上的做法是：
+
+1. 准备编码器 astcenc：从上游发布页下载对应系统的压缩包解开即可（<https://github.com/ARM-software/astc-encoder/releases>，Windows 用 `astcenc-…-windows-x64.zip` 里的 `bin/astcenc-avx2.exe`）。
+2. 做贴图包（三条命令，`<游戏文件目录>` 同上，`D` 是你选的输出目录）：
+
+   ```
+   python3 dm/tools/astc_pack.py <游戏文件目录>/RomFS D/work --astcenc <astcenc 的路径> --preset thorough
+   python3 dm/tools/casc_overlay.py pack <游戏文件目录>/RomFS D/pack D/work/repl.tsv 0-8
+   python3 dm/tools/astc_pack.py finalize D/pack
+   ```
+
+3. 做包时带上它：把环境变量 `D2RM_ASTC_PACK` 设成 `D/pack` 的完整路径，再照第一步运行 `d2rm_pack.py`。工具会说一句「带老机型支持」。
+4. 第三步放游戏资源时，把 `D/pack/Legacy Device Pack` 这个文件夹也整个拷进手机，和游戏资源文件夹放在同一层。
+
+贴图包和安装包是配对的：重新做了贴图包，就要重新做包。
 
 ## 出了问题
 

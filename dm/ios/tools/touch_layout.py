@@ -195,6 +195,8 @@ def pad_bliss(s):   # 手柄版建角模式页（原版布局原样）+ 「极�
     s, n = re.subn(r'\{\s*"action"\s*:\s*"option2"\s*,\s*"description"\s*:\s*"@LegacyGameVersionSwitch"\s*\}\s*,?', '', s); assert n == 1, n
     at, add = INSERT['controller/console/characteroptionspanelhd.json']; ms = list(re.finditer(at, s)); assert len(ms) == 1
     key = '        { "type": "ImageWidget", "name": "TouchBlissKey", "fields": { "rect": { "x": -1665, "y": 1330, "scale": 1.5 }, "filename": "Controller/ControllerButtons/Switch/ButtonLeft" } },\n'
+    if os.environ.get('DM_OVERLAY_MAC'):   # Mac App：同位再带一个键盘键帽（缺省在屏外，玩家用键盘时宿主把两个对调，dm_padmode.c） | Mac App: one more keyboard key cap at the same position (off screen by default; when the player uses the keyboard the host swaps the two, dm_padmode.c)
+        key += '        { "type": "ImageWidget", "name": "TouchBlissKeyK", "fields": { "rect": { "x": 99999, "y": 1330, "scale": 1.5 }, "filename": "Ztouch_controller_buttons_ui/switchKButtonLeft" } },\n'
     return s[:ms[0].start()] + add.lstrip() + key + '        ' + s[ms[0].start():]
 def set_rect(s, name, x, y, w, h):
     m = re.search(r'"name"\s*:\s*"%s"' % re.escape(name), s); assert m, name
@@ -614,25 +616,22 @@ def _pause_no_help(ys, hide=('Help',), restart_y=None, extra=()):
         return s, n
     return fn
 # 手柄版暂停菜单（「难度、百宝囊存放挂暂停菜单」）：原版布局 + 我们的功能行，放原版路径（gen_romfs_overlay.py 手柄版布局）；触屏插回的关闭钮不带。
-# 行 = 选项 / 保存并退出 / 一键重开 / 切换难度 / 存放 / 编年史（经典版没有）/ 分享诊断日志；帮助、战利品过滤器、消息记录照的裁定不留。
+# 行 = 游戏难度 / 保存并退出 / 一键重开 / 选项 / 存放 / 编年史（经典版没有）/ 分享诊断日志；帮助、战利品过滤器、消息记录照的裁定不留。
+#   「选项」固定在第四行（y 653）：原版手柄版开暂停菜单时自由光标在屏幕正中、压着哪行哪行高亮，直接按确认就点它——正中那行只许是按了没后果的。
 #   「游戏难度：N」= 按一下人数档 +1（8 之后回 1），当前档位写在这一行上；「存放」= 物品栏「存放」钮同一件事（手柄焦点到不了那颗钮），字用原版串 @strGoldDeposit。
-# 按钮图高 120 单位：带编年史那版七行在原版首末两行之间（278–1028）等距 125；经典版原底图只放得下四行，换用带编年史那版的底图（同尺寸），六行等距 150
-# Controller pause menu ("difficulty and pouch Deposit live in the pause menu"): original layout + our feature rows, placed at the original path
-# (gen_romfs_overlay.py controller layouts); the close button re-inserted for touch is not included.
-# Rows = Options / Save and Exit / one-tap restart / change difficulty / Deposit / Chronicle (absent in the classic version) / Share Diagnostics; Help,
-# Loot Filter and Message Log are left out per an earlier decision.
-#   "Game Difficulty: N" = each press raises the /players setting by 1 (wrapping to 1 after 8), with the current setting written on this row;
-#   "Deposit" = the same thing as the inventory "Deposit" button (controller focus cannot reach that button), with its text taken from the original string
-#   @strGoldDeposit.
-# Button image height is 120 units: the seven rows of the version with Chronicle are spaced evenly at 125 between the original first and last rows
-# (278–1028); the classic version's original background only fits four rows, so the background of the version with Chronicle is used instead (same
-# size), six rows spaced evenly at 150
-def pad_pause(s, garden):
-    ex = lambda y0, dy: (('TouchPadDiff', '', y0), ('TouchPadStore', '@strGoldDeposit', y0 + dy))
-    if garden: s, y = _pause_no_help({'Settings': (428, 278), 'Exit': (728, 403), 'Chronicle': (1028, 903), 'MessageLog': (278, 1028)}, hide=('Help', 'LootFilter'), restart_y=528, extra=ex(653, 125))(s)[0], 653
+# 按钮图高 120 单位：带编年史那版七行在原版首末两行之间（278–1028）等距 125；经典版原底图只放得下四行，换用带编年史那版的底图（同尺寸），同一套行距排前六行（少编年史那行，后一行上移）
+# Gamepad pause menu ("difficulty and trove deposit hang on the pause menu"): the original layout + our feature rows, placed at the original path (gamepad layout in gen_romfs_overlay.py); the close button inserted for touch is not included.
+# Rows = Game Difficulty / Save and Exit / Quick Restart / Options / Deposit / Chronicle (absent in the classic version) / Share Diagnostics; Help, Loot Filter and Message Log are not kept, as ruled.
+#   "Options" is fixed on the fourth row (y 653): when the original gamepad UI opens the pause menu the free cursor is at the centre of the screen and highlights whichever row it rests on, and pressing confirm straight away activates it -- the centre row may only be one whose press has no consequence.
+#   "Game Difficulty: N" = one press raises the player-count setting by 1 (back to 1 after 8), with the current setting shown on this row; "Deposit" = the same thing as the "Deposit" button of the inventory (the gamepad focus cannot reach that button), using the original string @strGoldDeposit.
+# Button image height is 120 units: in the version with the Chronicle, seven rows are spaced evenly by 125 between the original first and last rows (278–1028); the classic version's own background only fits four rows, so the background of the Chronicle version (same size) is used and the first six rows are laid out with the same spacing (without the Chronicle row, the following row moves up)
+def pad_pause(s, garden, share=True):   # share=False（Mac App）：没有系统分享面板，「分享诊断日志」行不放 | share=False (Mac App): there is no system share sheet, so the "Share Diagnostics" row is left out
+    ex = (('TouchPadDiff', '', 278), ('TouchPadStore', '@strGoldDeposit', 778)); y = 278
+    sh = lambda y0, y1: {'MessageLog': (y0, y1)} if share else {}; hs = () if share else ('MessageLog',)
+    if garden: s = _pause_no_help({'Settings': (428, 653), 'Exit': (728, 403), 'Chronicle': (1028, 903), **sh(278, 1028)}, hide=('Help', 'LootFilter') + hs, restart_y=528, extra=ex)(s)[0]
     else:
         s = _sub1(s, '"filename": "Controller/Panel/EscapeMenu/EscapeOptionsBGClassic"', '"filename": "Controller/Panel/EscapeMenu/EscapeOptionsBG"')
-        s, y = _pause_no_help({'Settings': (578, 278), 'Exit': (878, 428), 'MessageLog': (428, 1028)}, hide=('Help',), restart_y=578, extra=ex(728, 150))(s)[0], 728
+        s = _pause_no_help({'Settings': (578, 653), 'Exit': (878, 403), **sh(428, 903)}, hide=('Help',) + hs, restart_y=528, extra=ex)(s)[0]
     # 「游戏难度：N」的字：菜单开着时游戏停拍、原版系统通知要关了菜单才出，所以当前档位直接写在这一行上——按钮自己不带字，上面叠一个同字体的文字控件，宿主写（dm_padmode.c）
     # Text of "Game Difficulty: N": while the menu is open the game stops ticking and the original system notification only appears once the menu is closed,
     # so the current setting is written directly on this row. The button itself carries no text; a text widget with the same font is stacked on top and
@@ -811,6 +810,8 @@ def _rf_div(name, x, y, w=500):   # 分隔金线按所在栏宽缩放 | The gold
     return {'type': 'ImageWidget', 'name': name, 'fields': {'rect': {'x': x, 'y': y, 'scale': round(w / RF_DIV_W, 4)}, 'filename': 'PauseMenu\\Divider'}}
 def _rf_key(name, cap, by):   # 手柄模式下贴在按钮左端的原版键帽（Switch 手柄：右 = A、上 = X；48×45 原图放大 1.5）。缺省在屏外，宿主在手柄模式挪进来（dm_rift_ui.c）；这一页原版底部提示条不在屏上 | The original button glyph placed at the left end of the button in controller mode (Switch controller: right = A, top = X; the 48x45 source image scaled by 1.5). Off screen by default, moved in by the host in controller mode (dm_rift_ui.c); on this page the original bottom button legend is not on screen
     return {'type': 'ImageWidget', 'name': name, 'fields': {'rect': {'x': 99999, 'y': by + 26, 'scale': 1.5}, 'filename': 'Controller/ControllerButtons/Switch/' + cap}}
+def _rf_keys(name, cap, by):   # Mac App 的覆盖层（DM_OVERLAY_MAC）再带一个同位的键盘键帽（名字加 K，图在 kbd_glyphs.py 那一套里）：玩家用键盘时宿主显示它、藏手柄那个。iOS 的覆盖层不带 | the Mac App's overlay (DM_OVERLAY_MAC) additionally carries a keyboard key cap at the same position (name with K appended, images from the kbd_glyphs.py set): when the player uses the keyboard the host shows it and hides the gamepad one. The iOS overlay does not carry it
+    k = _rf_key(name, cap, by); return [k] + ([dict(k, name=name + 'K', fields=dict(k['fields'], filename='Ztouch_controller_buttons_ui/switchK' + cap))] if os.environ.get('DM_OVERLAY_MAC') else [])
 def _rift_board():
     # 左栏：标题 0–65 → 箭头组 80–188（大厅大箭头 94×108 原尺寸，层数大字在两箭头正中）→ ±10 两个等宽钮 212–267（前端小按钮 366×92 × 0.596 = 218×55，间隔 24，左右与箭头组对齐）
     #   → 本层信息 5 行（行距 64）307–627 → 组间 40 → 安亚赌博 667–851 → 「开始」贴底：底边 = 右列列表底边 1280，宽 460（前端中按钮 470×118 × 0.979）
@@ -830,7 +831,7 @@ def _rift_board():
     # Four rows (row pitch 64, same as 「本层」(This Level)): gray label on the left (unique / set / unique after clear / set after clear) + right-aligned value (one widget each in unique gold and set green; the host fills one of them).
     # Two rows of full sentences and two side-by-side columns both exceed the column width (Mac screenshot: truncated / overlapping each other); five rows with a subtitle are too cramped on the real device (row pitch 56, last row touching 「开始」(Enter Rift))
     for n in range(4): sel += [_kb_text('TouchRF_Gam%dL' % n, 0, 842 + 64 * n, 300, 56, '$FontColorMoreLightGray', '$MediumFontSize', 'left'), _kb_text('TouchRF_Gam%dLE' % n, 99999, 842 + 64 * n, 330, 56, '$FontColorMoreLightGray', RF_EN_PT, 'left'), _kb_text('TouchRF_Gam%dU' % n, 230, 842 + 64 * n, 250, 56, '$FontColorGoldYellow', '$MediumFontSize', 'right'), _kb_text('TouchRF_Gam%dS' % n, 230, 842 + 64 * n, 250, 56, '$FontColorGreen', '$MediumFontSize', 'right')]
-    sel += [_rf_btn('TouchRF_Start', 0, 1155, 'FrontEnd/HD/Final/FrontEnd_ButtonMed', _RF_BTN, 1.064, '@dmRiftBtnStart'), _rf_key('TouchRF_KeyA', 'ButtonRight', 1155)]
+    sel += [_rf_btn('TouchRF_Start', 0, 1155, 'FrontEnd/HD/Final/FrontEnd_ButtonMed', _RF_BTN, 1.064, '@dmRiftBtnStart')] + _rf_keys('TouchRF_KeyA', 'ButtonRight', 1155)
     # 进行中页：层数大字 96–204 → 「本层」小节（标题 332、金线 394、三行 414 / 478 / 542，与选层页同位）→ 放弃一组（说明 746、按钮 818–943）→ 继续一组贴底（说明 1083、按钮 1155，同「开始」）。
     # 信息—放弃—继续三段间距相等（各 140）；按钮上方的说明都是四到八个字的短句、居中（放弃那句与「本层」三行宿主按「守护者打倒没有」换说法）
     # In-progress page: large level number text 96–204 → 「本层」(This Level) section (title 332, gold line 394, three rows 414 / 478 / 542, same positions as the level selection page) → abandon group (caption 746, button 818–943) → continue group flush against the bottom (caption 1083, button 1155, same as 「开始」(Enter Rift)).
@@ -851,7 +852,7 @@ def _rift_board():
             # When this level is completed the secondary button becomes "Reselect level" (progress is already recorded, so "Abandon" reads wrong). The host cannot
             # change button text, so a button is placed at the same position and the host moves it in and out according to "has the Guardian been defeated"
             _rf_btn('TouchRF_Resel', 99999, 818, 'FrontEnd/HD/Final/FrontEnd_ButtonMed', _RF_BTN, 1.064, '@dmRiftBtnResel'),
-            _rf_key('TouchRF_KeyA2', 'ButtonRight', 1155), _rf_key('TouchRF_KeyX', 'ButtonTop', 818)]
+            ] + _rf_keys('TouchRF_KeyA2', 'ButtonRight', 1155) + _rf_keys('TouchRF_KeyX', 'ButtonTop', 818)
     right = [_kb_text('TouchRF_MsT', 530, RF_T0, 500, 60, '$FontColorGoldYellow', '$MediumFontSize', 'left', '@dmRiftMsT'), _rf_div('TouchRF_DivR', 530, 62, 1157),
              _kb_text('TouchRF_MsN', 1030, RF_T0, 657, 60, '$FontColorMoreLightGray', '$SmallFontSize', 'right', '@dmRiftMsN'),
              # 英文版的这一句写物品原名（Token of Absolution），比中文长一倍：另放一个更宽、字号更小的控件，缺省在屏外，英文时宿主换用
@@ -896,12 +897,19 @@ def _rift_panel(s):
                      {'type': 'ImageWidget', 'name': 'TouchRF_FrameBg', 'fields': {'filename': '\\PANEL\\Options\\FrontEndOptionsBG'}},
                      {'type': 'TextBoxWidget', 'name': 'TouchRF_Title', 'fields': {'rect': {'x': 0, 'y': 45, 'width': 1950, 'height': 103}, 'text': '@dmRiftPanelTitle', 'style': '$StyleTitleBlock'}},
                      {'type': 'ButtonWidget', 'name': 'TouchRF_CloseBtn', 'fields': {'rect': {'x': 1868, 'y': 8}, 'filename': 'PANEL\\closebtn_4x', 'hoveredFrame': 3, 'onClickMessage': close,
-                      'tooltipString': '@strClose', 'sound': 'cursor_close_window_hd', 'acceptsEscKeyEverywhere': True}}]}]},
+                      'tooltipString': '@strClose', 'sound': 'cursor_close_window_hd', 'acceptsEscKeyEverywhere': True}},
+                     # 触摸关闭钮：外框右上角同一处只留一个——手柄 / 键鼠显示上面那个原版红框，触屏显示这个金色 X（与别的面板同图），宿主按模式把另一个挪出屏（dm_rift_ui.c）。
+                     # 位置：标题条（y 45 起、高 103，深色底）那一行的右端、面板内侧——金 X（24×33 像素 = 48×66 单位，单位是外框贴图像素的 2 倍）垂直居中于标题条：
+                     # y = 45 + 103 / 2 − 33 = 64；x = 1766：整个 X 落在标题条右端角花（约 1832 起）以左的深色底上，不伸出外框、不压角花。原先对准红框中心，一半伸出外框、压着石角花纹，几乎看不见
+                     # 点按热区：金 X 本体只有约 10×13 点，另放一个透明的按钮罩在它上面当热区（借触屏那套透明键帽图 48×45 像素，放大 2.4 倍 = 约 46×43 点），中心对准 X 的中心（x 1705 是按「按名字取到的控件中心」实测校的：1675 时偏左 6 点）
+                     # Touch close button: only one stays at the same place at the top right of the frame - gamepad / keyboard-and-mouse show the original red frame above, touch shows this gold X (same image as other panels), and the host moves the other one off screen by mode (dm_rift_ui.c).
+                     # Position: at the right end of the title bar row (starting at y 45, 103 high, dark background), inside the panel - the gold X (24x33 pixels = 48x66 units, a unit being twice a pixel of the frame texture) is centred vertically on the title bar:
+                     # y = 45 + 103 / 2 - 33 = 64; x = 1766: the whole X sits on the dark background to the left of the corner ornament at the right end of the title bar (starting at about 1832), neither sticking out of the frame nor covering the ornament. It used to be aligned with the centre of the red frame, half outside the frame and on top of the stone corner pattern, nearly invisible
+                     # Tap hot zone: the gold X itself is only about 10x13 points, so a transparent button is placed over it as the hot zone (borrowing the touch layout's transparent key-cap image of 48x45 pixels, enlarged 2.4 times = about 46x43 points), centred on the centre of the X (x 1705 was calibrated by measuring "the widget centre fetched by name": at 1675 it was 6 points to the left)
+                     {'type': 'ImageWidget', 'name': 'TouchRF_CloseX', 'fields': {'rect': {'x': 1766, 'y': 64}, 'filename': 'PANEL\\HUD_02\\front_panel'}},
+                     {'type': 'ButtonWidget', 'name': 'TouchClose', 'fields': {'rect': {'x': 1705, 'y': -11, 'scale': 2.4}, 'filename': 'Ztouch_controller_buttons_ui/switch_ButtonRight', 'sound': 'cursor_close_window_hd', 'onClickMessage': close}}]}]},
              {'type': 'ImageWidget', 'name': 'TouchRF_ContentBg', 'fields': {'rect': '$SettingsPanelBackgroundRect', 'anchor': {'x': 0.5}, 'filename': 'Controller/Panel/Options/Panel_Options_BG'}},
-             # 触摸关闭钮：同编年史 _chronicle_touch（右上角）
-             # Touch close button: same as the chronicle's _chronicle_touch (top-right corner)
-             {'type': 'Widget', 'name': 'TouchCloseBox', 'fields': {'rect': {'x': -998, 'y': 256, 'width': 2600, 'height': 121, 'scale': '$ConsoleUIScale'}, 'anchor': {'x': 0.5}}, 'children': [
-                 {'type': 'ButtonWidget', 'name': 'TouchClose', 'fields': {'rect': {'x': 2236, 'y': -171}, 'filename': 'PANEL\\HUD_02\\front_panel', 'sound': 'cursor_close_window_hd', 'onClickMessage': close}}]}]
+             ]
     board = _rift_board(); board['children'][0]['fields']['rect']['x'] = 0; board['children'][0]['fields']['rect']['y'] = -54   # 没有页签条：内容上移 54，吃掉标题下的空带，底边留出与左边距相当的空（原先上空下贴底）   # 内容缺省就在屏上（编年史版要切页签才挪进来） | No tab strip: content moves up 54, taking up the empty band under the title, leaving a gap at the bottom edge comparable to the left margin (previously empty at the top and flush against the bottom) # the content is on screen by default (the chronicle version only moves it in when the tab is switched)
     lay = {'basedOn': 'MessageLogPanel_800x600HD.json', 'type': 'MessageLogPanel', 'name': 'MessageLogPanel',
            'fields': {'priority': 9002, 'fitToParent': True, 'defaultWidget': 'TouchRF_Start'}, 'children': native + frame + [board]}
@@ -1190,7 +1198,7 @@ _CUSTOM_ROWS = tuple((k, '@' + _custom_key(k)) for k in _CUSTOM_KEYS)
 # Dimensions are taken from the values the table lays out in the same widget tree: row height 180; text 1000×180; checkbox at x 1315 within the row, 70×70, vertically centered. Header row 180 (the gold divider line below it is placed for a 180 row height).
 # The first row is the language switch (also first in the host's key table), followed by the rows of _CUSTOM_KEYS; adding a row = adding a key to _CUSTOM_KEYS (and to k_keys in the host's dm_custom.c in the same order)
 _CUSTOM_TITLE_H, _CUSTOM_LINE_H = 180, 180
-_CUSTOM_ALL = (('lang_en', '@dmCustomLangEn'),) + _CUSTOM_ROWS
+_CUSTOM_ALL = (('lang_en', '@dmCustomLang'),) + _CUSTOM_ROWS
 _CUSTOM_TEST_ROWS = int(os.environ.get('DM_CUSTOM_TEST_ROWS', '0'))   # 测试（造现场）：末尾多摆这么多行假行，验更多行时的滚动；产品不设 | test (test setup): append this many dummy rows at the end, to verify scrolling with more rows; not set in the product
 _CUSTOM_Y = [_CUSTOM_TITLE_H + _CUSTOM_LINE_H * i for i in range(len(_CUSTOM_ALL) + _CUSTOM_TEST_ROWS)]
 _CUSTOM_H = _CUSTOM_TITLE_H + _CUSTOM_LINE_H * (len(_CUSTOM_ALL) + _CUSTOM_TEST_ROWS)
@@ -1208,8 +1216,28 @@ def _custom_toggle_row(i, key, label):
 # 「重启游戏后生效」那句先放在屏外，勾选与当前语言不一致时宿主挪到这一行文字的下半（横坐标取标签的）
 # Language switch (first row, an ordinary row): checked = English UI + English voice, effective at the next launch (lang_en in the host's dm_custom.c, settings_lang_apply in hle_fs.c).
 # The line 「重启游戏后生效」(Takes effect after restarting the game) is first placed off screen; when the checkbox does not match the current language the host moves it to the lower half of this row's text (x taken from the label)
-_CUSTOM_LANG_HINT = ('        { "type": "TextBoxWidget", "name": "TouchCustomLangHint", "fields": { "rect": { "x": 99999, "y": %d, "width": 1000, "height": 60 }, "text": "@dmCustomLangHint", "style": "$StyleSettingsText" } },\n'
-                     % (_CUSTOM_Y[0] + 112))
+_CUSTOM_LANG_HINT = ''.join('        { "type": "TextBoxWidget", "name": "TouchCustomLangHint%s", "fields": { "rect": { "x": 99999, "y": %d, "width": 1400, "height": 60 }, "text": "@dmCustomLangHint%s", "style": "$StyleSettingsText", "style/fontFace": "BlizzardGlobal" } },\n'
+                            % (n, _CUSTOM_Y[0] + 112, n) for n in ('Zh', 'En'))   # 两句各一个控件，宿主按选中的语言摆其中一句 | One control per sentence; the host places one of them according to the chosen language
+# 语言那一行是并排的两个选项「中文 / English」（单选：宿主 dm_custom.c 让两个勾选框互斥，存的仍是 lang_en 一个键）。
+# 这一行的字两种界面都要写汉字：英文界面缺省的 Formal 字体没有汉字（缺字画不出），所以这几个文字控件指定原版的全球字体 BlizzardGlobal
+# （原版标题页、队伍名等同样按控件指定它）。English 的勾选框留在各行勾选框那一列，「中文」的在它左边
+# The language row is two options side by side, 「中文 / English」 (single choice: the host dm_custom.c makes the two checkboxes mutually exclusive, and what is stored is still the one key lang_en).
+# The text of this row has to show Chinese characters in both UIs: the default Formal font of the English UI has no Chinese characters (missing glyphs cannot be drawn), so these text controls specify the original global font BlizzardGlobal
+# (the original title page, party names and so on specify it per control in the same way). The checkbox of English stays in the column where every row has its checkbox; the one of 「中文」 is to its left
+_LANG_ZH_X, _LANG_EN_X = (770, 905), (1100, 1315)   # （文字 x，勾选框 x） | (text x, checkbox x)
+def _custom_lang_row():
+    y, h = _CUSTOM_Y[0], 112; cy = y + (h - 70) // 2   # 标签、两个选项排在这一行的上 112，下面 68 留给提示那一句 | The label and the two options go in the top 112 of this row; the bottom 68 is left for the hint sentence
+    def text(name, x, w, key): return ('        { "type": "TextBoxWidget", "name": "%s", "fields": { "rect": { "x": %d, "y": %d, "width": %d, "height": %d }, "text": "@%s", "style": "$StyleSettingsText", "style/fontFace": "BlizzardGlobal" } },\n' % (name, x, y, w, h, key))
+    def box(name, x): return ('        { "type": "ToggleButtonWidget", "name": "%s", "fields": {\n'
+            '            "rect": { "x": %d, "y": %d, "width": 70, "height": 70 }, "sound": "cursor_menu_select_hd",\n'
+            '            "focusIndicatorPadding": "$OptionsToggleFocusIndicatorPadding", "focusIndicatorFilename": "$OptionsToggleFocusIndicatorFilename", "focusIndicatorOffset": { "x": 0, "y": -4 },\n'
+            '            "filename": "Lobby\\\\CreateGame\\\\CreateGame_AdvancedCheckbox",\n'
+            '            "untoggledFrame": 0, "untoggledPressedFrame": 1, "untoggledHoveredFrame": 3, "untoggledDisabledFrame": 2,\n'
+            '            "toggledFrame": 4, "toggledPressedFrame": 5, "toggledHoveredFrame": 6,\n'
+            '            "onClickMessage": "PanelManager:ClosePanel:%s" } },\n') % (name, x, cy, name)
+    return (text('TouchCustom_lang_en_Text', 0, 700, 'dmCustomLang')
+            + text('TouchCustomLangZh_Text', _LANG_ZH_X[0], _LANG_ZH_X[1] - _LANG_ZH_X[0] - 10, 'dmCustomLangZh') + box('TouchCustom_lang_zh', _LANG_ZH_X[1])
+            + text('TouchCustomLangEn_Text', _LANG_EN_X[0], _LANG_EN_X[1] - _LANG_EN_X[0] - 10, 'dmCustomLangEnOpt') + box('TouchCustom_lang_en', _LANG_EN_X[1]))
 def _custom_page(text):
     if '"name": "VideoOptionsPanel"' not in text or '"name": "OptionsTable"' not in text: raise SystemExit('touch_layout：主机版视频页不是原样（原版布局变了？），自定义页没换')
     title = ('{ "type": "TableRowWidget", "name": "Row TouchCustomTitle", "children": [\n'
@@ -1223,7 +1251,7 @@ def _custom_page(text):
            '            { "type": "TableWidget", "name": "OptionsTable", "fields": { "columns": [ "$OptionsTableColumn1", "$OptionsTableColumn2" ], "rowHeight": %d }, "children": [\n' % _CUSTOM_TITLE_H
            + title + '            ] },\n'
            + '            { "type": "Widget", "name": "TouchCustomRows", "fields": { "rect": { "x": 0, "y": 0, "width": 1500, "height": %d } }, "children": [\n' % _CUSTOM_H
-           + ''.join(_custom_toggle_row(i, k, l) for i, (k, l) in enumerate(_CUSTOM_ALL)) + _CUSTOM_LANG_HINT
+           + _custom_lang_row() + ''.join(_custom_toggle_row(i, k, l) for i, (k, l) in enumerate(_CUSTOM_ALL) if i) + _CUSTOM_LANG_HINT
            + ''.join('        { "type": "TextBoxWidget", "name": "TouchCustomTest%d_Text", "fields": { "rect": { "x": 0, "y": %d, "width": 1000, "height": %d }, "text": "@KeyBindingTypeCustom", "style": "$StyleSettingsText" } },\n'
                      % (n, _CUSTOM_Y[len(_CUSTOM_ALL) + n], _CUSTOM_LINE_H) for n in range(_CUSTOM_TEST_ROWS)) +
            # 手柄模式的选中框（同符文之语清单 TouchRwSel）：框住十字键选中的那一行，宿主摆（dm_custom.c）；触屏模式一直在屏外（只把 x 挪出去、y 留在内容范围内：滚动区按子控件的范围算内容高度，y 放到 99999 会把可滚范围撑到十万）。和各行在同一个容器里，跟着滚

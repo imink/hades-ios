@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
 # 不用 Xcode 出可玩的安装包：把你自己的游戏文件做进「壳」。
-#   壳（D2RMobile-shell.ipa）是一个不含任何游戏内容、没有签名的安装包；本工具用你的游戏文件在你的电脑上生成它缺的全部内容
+#   壳（D2RMobile-shell-build-input.zip，构建原料、不能直接安装）是一个不含任何游戏内容、没有签名的安装包；本工具用你的游戏文件在你的电脑上生成它缺的全部内容
 #   （改写后的游戏程序、着色器库、覆盖层、界面素材、几张数据表），放进去，写出一个新的安装包。之后用自签工具整包签名装机。
 #   游戏文件只在本机读，不上传；做出来的安装包里有游戏内容，请只自己用，不要分发。
 # 用法：d2rm_pack.py <壳.ipa> <游戏文件目录> <输出.ipa>
 #   游戏文件目录 = Switch 版 3.3.94012 的 Update 目录，里面有 ExeFS/{main,sdk} 与 RomFS/data/…（怎么从自己的游戏导出）
 #   工作目录（缓存与中间产物，约 12 GB）：环境变量 DM_ROOT，缺省 ~/dm-work；每一步做过就跳过
+#   老机型（A16 及更早的芯片）：先做好贴图包，再带环境变量 D2RM_ASTC_PACK=<贴图包的 pack 目录> 运行本工具
 # 需要：Python 3.9+ 与 pillow numpy lz4 capstone unicorn；C 编译器（clang 或 gcc，解贴图的小段 C 用）；.NET SDK（编着色器翻译工具）；
 #   spirv-cross；苹果的 Metal 着色器编译器（Mac 上随 Xcode）。缺什么本工具开头会逐项报。
 # 它做的事与「./setup.sh + dm/ios/run.sh build 的生成部分」相同，只是最后不调 Xcode 构建，而是把产物放进壳里。
-# Build a playable install package without Xcode: put your own game files into the "shell".
-#   The shell (D2RMobile-shell.ipa) is an unsigned install package with no game content at all; this tool uses your game files to generate, on your computer, everything it lacks
-#   (the rewritten game program, shader libraries, overlay, UI assets, a few data tables), puts it in, and writes out a new install package. Afterwards sign the whole package with a sideloading tool and install it.
-#   The game files are only read locally and never uploaded; the resulting install package contains game content, so please use it only yourself and do not distribute it.
-# Usage: d2rm_pack.py <shell.ipa> <game files directory> <output.ipa>
-#   game files directory = the Update directory of Switch version 3.3.94012, containing ExeFS/{main,sdk} and RomFS/data/... (how to export it from your own game)
-#   working directory (cache and intermediate outputs, about 12 GB): environment variable DM_ROOT, default ~/dm-work; every step already done is skipped
-# Requires: Python 3.9+ with pillow numpy lz4 capstone unicorn; a C compiler (clang or gcc, for the small piece of C that decodes textures); the .NET SDK (to build the shader translation tool);
-#   spirv-cross; Apple's Metal shader compiler (on a Mac it comes with Xcode). This tool reports whatever is missing item by item at the start.
-# What it does is the same as "./setup.sh + the generation part of dm/ios/run.sh build", except that at the end it does not invoke an Xcode build but puts the build outputs into the shell.
+# Make a playable install package without Xcode: build your own game files into the "shell".
+#   The shell (D2RMobile-shell-build-input.zip, build input, not installable) is an unsigned install package with no game content; this tool generates everything it lacks from your game files on your computer
+#   (the rewritten game program, shader library, overlay, UI art and a few data tables), puts it in, and writes a new install package. Then sign the whole package with a sideloading tool and install it.
+#   Your game files are only read locally and never uploaded; the package you make contains game content, so keep it for yourself and do not distribute it.
+# Usage: d2rm_pack.py <shell.ipa> <game files dir> <output.ipa>
+#   game files dir = the Update directory of the Switch version 3.3.94012, containing ExeFS/{main,sdk} and RomFS/data/... (how to export it from your own game)
+#   Work directory (cache and intermediates, about 12 GB): environment variable DM_ROOT, default ~/dm-work; every step that is already done is skipped
+#   Older devices (A16 and earlier chips): build the texture pack first, then run this tool with D2RM_ASTC_PACK=<the texture pack's pack directory>
+# Requires: Python 3.9+ with pillow numpy lz4 capstone unicorn; a C compiler (clang or gcc, for a small C texture decoder); the .NET SDK (to build the shader translator);
+#   spirv-cross; Apple's Metal shader compiler (comes with Xcode on a Mac). The tool lists anything missing at the start.
+# It does the same as the generation part of ./setup.sh + dm/ios/run.sh build, except that instead of building with Xcode it puts the results into the shell.
 import hashlib, json, os, re, runpy, shutil, subprocess, sys, time, zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__)); DM = os.path.dirname(HERE); IOS = os.path.join(DM, 'ios'); GT = os.path.join(DM, 'gfx', 'tools')
@@ -70,6 +72,14 @@ def check_env(game):
         except Exception: bad.append('Python 包 %s：%s -m pip install pillow numpy lz4 capstone unicorn' % (m, PY))
     if not (shutil.which('clang') or shutil.which('gcc') or shutil.which('cc')): bad.append('C 编译器（clang 或 gcc）')
     dotnet = shutil.which('dotnet') or (os.path.expanduser('~/.dotnet/dotnet') if os.path.exists(os.path.expanduser('~/.dotnet/dotnet')) else None)
+    # 编出来的翻译工具是个独立的小程序，启动时自己找 .NET 运行时：只认 DOTNET_ROOT 和几个固定位置（Homebrew、发行版自带的常不在其中），找不到就起不来，
+    # 后面会被报成「翻译器不是用仓内源编的」。没设时按 dotnet 自己报的运行时位置设上，子进程都继承
+    # The translation tool that gets built is a standalone program that locates the .NET runtime itself at startup: it only looks at DOTNET_ROOT and a few fixed locations (Homebrew and distribution packages are often not among them), and cannot start when it finds none,
+    # which would later be reported as "the translator was not built from the in-repo source". When it is not set, set it from the runtime location dotnet itself reports; all child processes inherit it
+    if dotnet and not os.environ.get('DOTNET_ROOT'):
+        r = subprocess.run([dotnet, '--list-runtimes'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        m = re.search(r'^Microsoft\.NETCore\.App \S+ \[(.*)[/\\]shared[/\\]Microsoft\.NETCore\.App\]', r.stdout.decode('utf-8', 'replace'), re.M)
+        if m: os.environ['DOTNET_ROOT'] = m.group(1)
     if not dotnet: bad.append('.NET SDK（dotnet）：https://dotnet.microsoft.com/download')
     if not shutil.which('spirv-cross'): bad.append('spirv-cross：https://github.com/KhronosGroup/SPIRV-Cross')
     for f in ('ExeFS/main', 'ExeFS/sdk', 'RomFS/data/build_manifest.psv'):
@@ -146,8 +156,22 @@ def main():
     # 三、覆盖层
     # 3. Overlay
     say('生成覆盖层')
-    run([PY, os.path.join(IOS, 'tools', 'gen_romfs_overlay.py'), romfs, os.path.join(stage, 'romfs_overlay')], cwd=IOS, env={'DM_ROMFS_SRC': romfs}, log=os.path.join(stage, 'gen_overlay.log'), what='生成覆盖层')
-    for d in ('romfs_overlay_astc', 'romfs_overlay_astc_variants'): shutil.rmtree(os.path.join(stage, d), ignore_errors=True)
+    # 老机型（显卡不支持 BC 贴图的 A16 及更早芯片）：D2RM_ASTC_PACK=<贴图包目录>（astc_pack.py + casc_overlay.py pack + astc_pack.py finalize 的产物，里面有 pack_index.tsv 与 pack.json）
+    # 给了就再出一套 ASTC 版覆盖层放进安装包（索引里那两万多张贴图指向贴图包的数据档，内容不进安装包；App 按其中的 pack.json 核对手机上的贴图包）。
+    # 它是从游戏资源现生成的，壳里不带；贴图包本身由使用者拷进手机。没给就不带，老机型上 App 会说明缺这一步
+    # Older devices (A16 and earlier chips, whose GPU does not support BC textures): D2RM_ASTC_PACK=<texture pack directory> (the output of astc_pack.py + casc_overlay.py pack + astc_pack.py finalize, containing pack_index.tsv and pack.json)
+    # When given, an additional ASTC overlay is produced and put into the install package (its index points the twenty-odd thousand textures at the data archive of the texture pack, whose content does not go into the install package; the App checks the pack on the phone against the pack.json in it).
+    # It is generated on the spot from the game resources and is not carried in the shell; the texture pack itself is copied to the phone by the user. When not given it is left out, and on older devices the App explains that this step is missing
+    astc = os.environ.get('D2RM_ASTC_PACK', '').strip(); astc = os.path.abspath(astc) if astc else ''
+    if astc and not all(os.path.isfile(os.path.join(astc, f)) for f in ('pack_index.tsv', 'pack.json')): die('D2RM_ASTC_PACK 指的目录里没有 pack_index.tsv / pack.json：%s（要的是贴图包三步做完后的那个 pack 目录）' % astc)
+    run([PY, os.path.join(IOS, 'tools', 'gen_romfs_overlay.py'), romfs, os.path.join(stage, 'romfs_overlay')], cwd=IOS, env={'DM_ROMFS_SRC': romfs, 'DM_ASTC_PACK': astc}, log=os.path.join(stage, 'gen_overlay.log'), what='生成覆盖层')
+    extra = []
+    if astc:
+        if not os.path.isfile(os.path.join(stage, 'romfs_overlay_astc', 'pack.json')): die('老机型的覆盖层没生成出来（见 %s）' % os.path.join(stage, 'gen_overlay.log'))
+        extra = ['romfs_overlay_astc/', 'romfs_overlay_astc_variants/']; pj = json.load(open(os.path.join(astc, 'pack.json'), encoding='utf-8'))
+        say('带老机型支持：贴图包 %s（%.2f GB，SHA-256 %s…）；装机后把它里面给手机用的那个文件夹（收尾那一步生成的）拷进手机' % (astc, pj['size'] / 1e9, pj['sha256'][:12]))
+    else:
+        for d in ('romfs_overlay_astc', 'romfs_overlay_astc_variants'): shutil.rmtree(os.path.join(stage, d), ignore_errors=True)
 
     # 四、着色器：取包 → 翻译工具 → 翻译并编成 Metal 库（与 setup.sh 相同）
     # 4. Shaders: extract the shader packs from the game resources → translation tool → translate and compile into Metal libraries (same as setup.sh)
@@ -213,14 +237,19 @@ def main():
     if ('b-' + chain) not in open(c1, encoding='utf-8').readline(): die('着色器下标清单首行的链版本不是壳要的 %s' % chain)
     say('自检：%d 个着色器说明、下标清单、目录名的链版本都是壳要的 %s；翻译出的源码摘要 %s%s' % (len(js), chain, got, '与壳一致' if info.get('SHADER_SRC') else '（这个壳没带摘要，没比）'))
 
+    # 打包记录：做进去的内容是哪个产物代号。壳启动时与 dm/shell_info.txt 的代号比，不一致（拼装出来的包）就弹框说明、不起游戏（main.m pack_check）
+    # Pack record: which product generation was built in. At launch the shell compares it with the generation in dm/shell_info.txt; if they differ (a package assembled from different releases) it shows a message and does not start the game (main.m pack_check)
+    with open(os.path.join(stage, 'dm', 'pack_info.txt'), 'w', encoding='utf-8') as f: f.write('PRODUCT=%s\n' % P)
+    extra = extra + ['dm/pack_info.txt']
+
     # 六、照壳的清单核对一项不缺，再放进去
     # 6. Check against the shell's manifest that nothing is missing, then put it in
     miss = [m for m in manifest if not (os.path.isdir(os.path.join(stage, m)) if m.endswith('/') else os.path.isfile(os.path.join(stage, m)))]
-    if miss: die('有 %d 项没做出来：%s。壳的清单里要、而这份工具没有生成——壳与工具不是同一版。请用与这份仓库同一版本的壳（发布页最新的 D2RMobile-shell.ipa），或把仓库更新到与壳对应的版本' % (len(miss), '、'.join(miss)))
+    if miss: die('有 %d 项没做出来：%s。壳的清单里要、而这份工具没有生成——壳与工具不是同一版。请用与这份仓库同一版本的壳（发布页最新的 D2RMobile-shell-build-input.zip），或把仓库更新到与壳对应的版本' % (len(miss), '、'.join(miss)))
     tmp = out_ipa + '.part'; added = 0
     with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as o:
         for i in z.infolist(): o.writestr(i, z.read(i.filename))
-        for m in manifest:
+        for m in manifest + extra:
             src = os.path.join(stage, m)
             files = [os.path.join(d, f) for d, _, fs in sorted(os.walk(src)) for f in sorted(fs)] if m.endswith('/') else [src]
             for f in files:

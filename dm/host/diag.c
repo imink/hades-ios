@@ -438,6 +438,7 @@ static void setlang_obs(const uint64_t *regs) {
 void probe_install(void) {
     if (gate_obs_present(OBS_SETLANG)) gate_obs_set(OBS_SETLANG, setlang_obs);
     if (gate_obs_present(OBS_EVENT_MSG)) gate_obs_set(OBS_EVENT_MSG, event_msg_obs);
+    { void dm_ui_tooltip_obs(const uint64_t *regs); if (gate_obs_present(OBS_TOOLTIP)) gate_obs_set(OBS_TOOLTIP, dm_ui_tooltip_obs); }   // 说明框停靠（dm_cursor.c） | tooltip docking (dm_cursor.c)
     const char *ui = getenv("DM_UIMSG");
     if (ui && strcmp(ui, "1") && !(g_uifp = fopen(ui, "w"))) die("DM_UIMSG 打不开 %s", ui);
     g_ui_print = ui != NULL;
@@ -585,6 +586,10 @@ void inflate_bench_maybe(void) {
 // 5 unit tables (128 buckets, next=+0x158) + global seed G+0x1a8, merged in stable ascending (type, id) order into each cell's FNV-1a 64. Unreadable pointers follow the ground-truth Reader semantics (failed read = None).
 // One JSON line per tick (fields in the same order and with the same separators as swtick.py's json.dumps); each tick number is taken only once, a gap reports a failure; exits normally once DM_TICKS_N ticks are recorded. When off, no callback is attached to the observation gate.
 static int tk_rd(uint64_t a, void *buf, size_t n);
+static _Atomic uint64_t g_player_path;   // 本地玩家的路径头（状态泵每拍更新） | path head of the local player (updated by the state pump every tick)
+// 本地玩家的逻辑位置（16.16 定点，格）：给图形层的连拍逐帧记一份，好和画面位移对照。读不到返回 0
+// Logical position of the local player (16.16 fixed point, tiles): the graphics layer's burst capture records one per frame so it can be compared with on-screen displacement. Returns 0 when it cannot be read
+int dm_diag_player_fixed(uint32_t *x, uint32_t *y) { uint64_t pp = atomic_load(&g_player_path); uint32_t c[2]; if (!pp || !tk_rd(pp, c, 8)) return 0; *x = c[0]; *y = c[1]; return 1; }
 static FILE *g_tkfp; static int g_tkfull; static long g_tkleft = -1; static int64_t g_tklast = -1; static uint64_t g_tkt0; static unsigned g_tkreads;
 static FILE *g_spfp;
 // ---- 难度档位与 HUD 数字（dm_hud.h）：都在拍入口（游戏线程）读写客体，前端经 dm_hud_get / dm_hud_request_players 交互 ----
@@ -808,6 +813,7 @@ static void hud_tick(uint64_t G) {        // 每拍：受控玩家等级 / 本�
         h.level = (int)lv;
         { uint64_t pp = 0, r1 = 0, r2 = 0, lvl = 0; uint16_t c[4] = {0}; uint32_t no = 0;   // 坐标：单位 +0x38 → 路径头 4 个 16 位（x 小数 / x / y 小数 / y） | Coordinates: unit +0x38 → 4 16-bit values at the head of the path (x fraction / x / y fraction / y)
           if (tk_rd(player + 0x38, &pp, 8) && tk_rd(pp, c, 8)) { h.x = c[1]; h.y = c[3]; }
+          atomic_store(&g_player_path, pp);   // 连拍（dm_gfx_burst）逐帧读位置用 | used by burst capture (dm_gfx_burst) to read the position per frame
           // 区域号（levels.txt 的 Id：1 = 罗格营地，2 = 鲜血荒地…）：路径 +0x20 → 所在房间 +0x18 → 区域房间 +0x90 → 区域 +0x1f8
           // Area number (Id in levels.txt: 1 = Rogue Encampment, 2 = Blood Moor...): path +0x20 → current room +0x18 → area room +0x90 → area +0x1f8
           if (pp && tk_rd(pp + 0x20, &r1, 8) && tk_rd(r1 + 0x18, &r2, 8) && tk_rd(r2 + 0x90, &lvl, 8) && tk_rd(lvl + 0x1f8, &no, 4) && no < 200) h.area = (int)no; }
@@ -965,14 +971,17 @@ static void hud_tick(uint64_t G) {        // 每拍：受控玩家等级 / 本�
                   LOG("DM_TEST_GIVE：拍 %u 在玩家旁生成「%s」品质 %d：%d / %d 件成功（物品类号 %u，第一件单位 id %u）%s", tq, code, q, ok, n, cls, id0, !getenv("DM_TEST_GIVE_INV") ? "" : inv == ok ? "，已全部捡进背包" : "，【注意】有没捡进背包的（留在地上）"); } } } }
     if (main && player) dm_elysium_stash_step(G, player, (uint8_t *)main->base);   // 新建极乐世界角色后补齐共享仓库（dm_elysium.c） | Fill in the shared stash after a new Elysium character is created (dm_elysium.c)
     { void dm_townwp_tick(uint64_t, uint64_t, uint8_t *); if (main && player) dm_townwp_tick(G, player, (uint8_t *)main->base); }   // 进局落在城镇小站旁（dm_townwp.c） | Land next to the town waypoint on joining a run (dm_townwp.c)
-    { int dm_cloud_conflict_take(void); static int shown;   // iCloud 同步拦下了共享仓库的覆盖（dm_cloudsync.c）：进局后弹一次原版系统提示（每次启动一次） | iCloud sync blocked an overwrite of the shared stash (dm_cloudsync.c): show the original game's system prompt once after joining a run (once per launch)
-      if (main && player && !shown && dm_cloud_conflict_take()) { shown = 1; dm_game_notice((uint8_t *)main->base, dm_str((uint8_t *)main->base, "dmCloudConflict")); LOG("iCloud 同步：弹了共享仓库不一致的提示"); } }
+    { int dm_cloud_conflict_take(void); static int shown;   // iCloud 共享仓库分叉、本机那份收进了待合并收件箱（dm_cloudsync.c）：进局后弹一次原版系统提示（每次启动一次） | the iCloud shared stash forked and the local copy was put in the to-merge inbox (dm_cloudsync.c): one original system notice after entering a run (once per launch)
+      if (main && player && !shown && dm_cloud_conflict_take()) { shown = 1; dm_game_notice((uint8_t *)main->base, dm_str((uint8_t *)main->base, "dmCloudConflict")); LOG("iCloud 同步：弹了共享仓库收进收件箱的提示"); } }
+    { int dm_cloud_char_conflict_take(char *, size_t); char nm[256], msg[400];   // iCloud 首次同步遇到同名角色、用了云端那份（dm_cloudsync.c）：进局后提示一次 | iCloud first sync met a character with the same name and used the cloud copy (dm_cloudsync.c): one notice after entering a run
+      if (main && player && dm_cloud_char_conflict_take(nm, sizeof nm)) { snprintf(msg, sizeof msg, dm_str((uint8_t *)main->base, "dmCloudCharConflict"), nm); dm_game_notice((uint8_t *)main->base, msg); LOG("iCloud 同步：弹了同名角色用云端那份的提示（%s）", nm); } }
     if (main && player) dm_bossrush_tick(G, player, (uint8_t *)main->base);   // 首领连战（dm_bossrush.c） | Boss rush (dm_bossrush.c)
     if (main && player) { void dm_rift_tick(uint64_t, uint64_t, uint8_t *); dm_rift_tick(G, player, (uint8_t *)main->base); }   // 秘境爬塔（dm_rift.c） | Rift tower climb (dm_rift.c)
     { void dm_pages_tick(uint64_t, uint64_t, uint8_t *); if (main) dm_pages_tick(G, player, (uint8_t *)main->base); }   // 个人仓库 2–5 页（dm_pages.c）；不在局内 player 为 0，模块自己清状态 | Personal stash pages 2–5 (dm_pages.c); player is 0 when not in a run, and the module clears its own state
     { void dm_vault_tick(uint64_t, uint64_t, uint8_t *); if (main) dm_vault_tick(G, player, (uint8_t *)main->base); }
     { void dm_autobuff_srv_tick(uint8_t *, uint64_t, uint64_t); if (main && player) dm_autobuff_srv_tick((uint8_t *)main->base, G, player); }   // 增益技能自动补：放主线程点名的技能 | Buff auto-recast: cast the skill named by the main thread
-    { void dm_pouch_srv_tick(uint8_t *, uint64_t, uint64_t); if (main) dm_pouch_srv_tick((uint8_t *)main->base, G, player); }   // 百宝囊收 / 放、存放的系统提示（dm_pouch.c）；不在局内 player 为 0   // 编年史仓库存取（dm_vault.c）；同上 | System prompts for pouch take / put and deposit (dm_pouch.c); player is 0 when not in a run   // Chronicle vault deposit / withdraw (dm_vault.c); same as above
+    { void dm_pouch_srv_tick(uint8_t *, uint64_t, uint64_t); if (main) dm_pouch_srv_tick((uint8_t *)main->base, G, player); }
+    { void dm_cloudmerge_srv_tick(uint8_t *, uint64_t, uint64_t); if (main) dm_cloudmerge_srv_tick((uint8_t *)main->base, G, player); }   // iCloud 收件箱局内并回（dm_cloudmerge.c）；不在局内 player 为 0   // 百宝囊收 / 放、存放的系统提示（dm_pouch.c）；不在局内 player 为 0   // 编年史仓库存取（dm_vault.c）；同上 | iCloud inbox in-game merge (dm_cloudmerge.c); player is 0 when not in game   // System notices for pouch take / put and deposit (dm_pouch.c); player is 0 when not in game   // Chronicle stash take / store (dm_vault.c); same as above
     if (main && player) dm_kills_tick(G, player, (uint8_t *)main->base);   // 刷怪积分牌（dm_kills.c）：在首领连战之后，连战本关的首领它已记好 id | Kill board (dm_kills.c): runs after boss rush, which has already recorded the id of the boss of the current boss rush stage
     cube_diag_tick(G, player);   // 合成读数 | Transmute readout
     if (main && player) seek_tp_step(G, player, main);
@@ -1183,6 +1192,9 @@ int dm_request_save(void) {
     *(volatile uint64_t *)(uintptr_t)(g_lastG + 0x5800) = 1;
     return 1;
 }
+// 游戏是不是停着（暂停菜单 / 大秘境选层页这类开着：同上两个界面状态字节）。不在局内返回 0
+// Whether the game is stopped (pause menu / Greater Rift level-selection page and the like open: the same two UI state bytes as above). Returns 0 when not in a game
+int dm_game_paused(void) { uint8_t *b = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) b = (uint8_t *)g_mod[i].base; return b && in_game() && (*(volatile uint8_t *)(b + 0x2d5ff51) | *(volatile uint8_t *)(b + 0x2d5ff67)); }
 // 测试用：按 id 取服务端物品单位（物品表 G+0x2e30，128 桶、next=+0x158）；不在局内 / 没找到返回 0
 // For tests: get a server item unit by id (item table G+0x2e30, 128 buckets, next=+0x158); returns 0 when not in a run / not found
 uint64_t dm_diag_srv_item(uint32_t id) { if (!in_game()) return 0; uint64_t u = 0; tk_rd(g_lastG + 0x2e30 + 8 * (id & 0x7f), &u, 8); for (int k = 0; u && k < 4096; k++) { uint32_t ty = 0, uid = 0; if (!tk_rd(u, &ty, 4) || !tk_rd(u + 8, &uid, 4)) return 0; if (ty == 4 && uid == id) return u; if (!tk_rd(u + 0x158, &u, 8)) return 0; } return 0; }
@@ -1615,18 +1627,70 @@ void dm_freeze_frame(int want) { static int idle;
     if (!atomic_load(&g_dm_frozen) || !atomic_load(&g_frz_by_panel) || want) { idle = 0; return; }
     if (++idle < 10) return; idle = 0; atomic_store(&g_dm_frozen, 0); atomic_store(&g_frz_by_panel, 0); if (mtl_world_frozen) mtl_world_frozen(0);
     LOG("面板冻结：解冻（面板已不在屏上而拍入口没在走：原版暂停 / 退出 / 换角色）"); }
+static int g_frz_on;   // 四个冻结入口门已挂上（freeze_attach） | The four freeze entry gates are attached (freeze_attach)
+static int freeze_attach(void) {   // 挂冻结用的四个入口门（产物里有门 10–13 才行），挂过就不再挂。返回 1 = 能冻 | Attach the four entry gates used for freezing (needs gates 10–13 in the product); attached only once. Returns 1 = can freeze
+    static int tried; if (tried) return g_frz_on; tried = 1;
+    g_frz_on = gate_obs_present(OBS_FREEZE_WORLD) && gate_obs_present(OBS_FREEZE_CLIENT) && gate_obs_present(OBS_FREEZE_ANIM) && gate_obs_present(OBS_FREEZE_RENDER);
+    if (g_frz_on) { gate_obs_set(OBS_FREEZE_WORLD, freeze_world_obs); gate_obs_set(OBS_FREEZE_CLIENT, freeze_client_obs); gate_obs_set(OBS_FREEZE_ANIM, freeze_anim_obs); gate_obs_set(OBS_FREEZE_RENDER, freeze_render_obs); }
+    return g_frz_on;
+}
+// 暂停菜单开着进后台时存一次盘：原版单机暂停时游戏不走拍，前端请的那次存盘要等下一拍，进后台 2.5 秒等不到（10142104 日志 4 次），
+// 上次自动存盘到开暂停之间的进度在后台被系统回收时会丢。做法：先冻住世界（同面板冻结：世界 / 客户端 / 动画 / 渲染四个入口换成空跑，拍号不前进——怪不动、时间不走），
+// 再临时放开原版暂停的两个界面状态字节让拍走起来、执行那次存盘；等到提交（前端 background_wait_save）后写回两个字节、解冻。前端在主线程调
+// Save once when going to the background with the pause menu open: in single-player pause the original game does not tick, so the save the front end asks for waits for the next tick and the 2.5 s background wait never sees it (seen 4 times in a player's log);
+// progress between the last autosave and opening the pause menu is lost if the system reclaims the app in the background. Method: first freeze the world (same as panel freezing: the world / client / animation / render entry points become no-ops and the tick number does not advance, so monsters do not move and time does not pass),
+// then temporarily release the two UI state bytes of the original pause so ticks run and perform the save; after the commit (front end background_wait_save) write the two bytes back and unfreeze. Called by the front end on the main thread
+static _Atomic int g_bgsave; static uint8_t g_bg_pause[2];
+static int save_unpause_begin(void) {   // 1 = 冻住世界并放开了暂停；0 = 游戏没停着（不用做）；-1 = 产物没有冻结门，做不了 | 1 = froze the world and released the pause; 0 = the game is not stopped (nothing to do); -1 = the product has no freeze gates, cannot do it
+    uint8_t *b = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) b = (uint8_t *)g_mod[i].base;
+    if (!b || !in_game()) return 0; volatile uint8_t *f = b + 0x2d5ff51, *g = b + 0x2d5ff67; if (!*f && !*g) return 0;
+    if (!freeze_attach()) { LOG("【红】停着存盘：游戏停着，但产物里没有冻结门 10–13，不放开暂停（这次存不了）"); return -1; }
+    atomic_store(&g_frz_by_panel, 0); atomic_store(&g_bgsave, 1); atomic_store(&g_dm_frozen, 1);   // 先冻、后放开：放开后的第一拍世界就已经是空跑 | Freeze first, then release: the world is already idle on the first tick after release
+    int nm = 0, hp = 0; uint32_t h = g_lastG ? frz_snapshot(g_lastG, &nm, &hp) : 0;
+    g_bg_pause[0] = *f; g_bg_pause[1] = *g; *f = 0; *g = 0;
+    LOG("停着存盘：游戏停着 → 冻住世界、临时放开原版暂停（怪 / 佣兵 %d 个，快照 %08x，玩家生命 %d）", nm, h, hp);
+    return 1;
+}
+static void save_unpause_end(void) {
+    if (!atomic_load(&g_bgsave)) return;
+    uint8_t *b = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) b = (uint8_t *)g_mod[i].base;
+    if (b) { *(volatile uint8_t *)(b + 0x2d5ff51) = g_bg_pause[0]; *(volatile uint8_t *)(b + 0x2d5ff67) = g_bg_pause[1]; }   // 先恢复暂停、后解冻：解冻后的拍不再走 | Restore the pause first, then unfreeze: ticks after unfreezing no longer advance
+    int nm = 0, hp = 0; uint32_t h = g_lastG ? frz_snapshot(g_lastG, &nm, &hp) : 0;
+    atomic_store(&g_bgsave, 0); atomic_store(&g_dm_frozen, 0);
+    LOG("停着存盘：恢复原版暂停、解冻（怪 / 佣兵 %d 个，快照 %08x，玩家生命 %d）", nm, h, hp);
+}
+// 前端要进程马上可能没了之前（iOS 进后台、Mac 退出）请游戏存一次盘并等提交：游戏停着（暂停菜单 / 大秘境面板开着）就先冻住世界、
+// 临时放开原版暂停让拍走起来执行这次存盘，等完写回暂停、解冻——玩家回来时世界与暂停都和离开前一样。等到「出现过存档提交、之后 0.2 秒没有新的提交」
+// （角色与共享箱是两个容器，可能分两次），最多 max_s 秒；还没进局（读取画面）就每 20 ms 再试，进了局再请。返回 1 = 请到了存盘。
+// *commits = 期间存档提交次数，*froze = 是否冻结放开过暂停，*ms = 用时。在前端主线程调（游戏拍在客体线程照跑）
+// Before the process may go away at any moment (iOS going to the background, quitting on Mac), the front end asks the game to save once and waits for the commit. If the game is stopped (pause menu / Greater Rift panel open), it first freezes the world,
+// temporarily releases the original pause so ticks run and perform this save, and after waiting writes the pause back and unfreezes, so when the player returns both the world and the pause are as they left them. It waits until "a save commit has happened and no new commit for 0.2 s"
+// (character and shared stash are two containers and may commit separately), at most max_s seconds; before entering a game (loading screen) it retries every 20 ms and asks once in game. Returns 1 = the save was requested.
+// *commits = number of save commits in the meantime, *froze = whether it froze and released the pause, *ms = time taken. Called on the front end's main thread (game ticks keep running on the guest thread)
+uint64_t dm_fs_commit_count(void);
+int dm_save_wait(double max_s, uint64_t *commits, int *froze, double *ms) {
+    uint64_t c0 = dm_fs_commit_count(), t0 = now_ns(), last = c0, last_t = 0, lim = (uint64_t)(max_s * 1e9); int asked = 0, bg = 0;
+    for (;;) {
+        if (!bg && in_game()) bg = save_unpause_begin();   // 先冻、放开暂停，再请存盘 | Freeze first, release the pause, then ask for the save
+        if (!asked) asked = dm_request_save();
+        usleep(20000); uint64_t c = dm_fs_commit_count(), t = now_ns();
+        if (c != last) { last = c; last_t = t; }
+        if ((asked && last_t && t - last_t >= 200000000ull) || t - t0 >= lim) break;
+    }
+    if (bg > 0) save_unpause_end();
+    *commits = last - c0; *froze = bg > 0; *ms = (now_ns() - t0) / 1e6;
+    return asked;
+}
 static void freeze_tick(uint64_t G) {   // 拍入口：定这一拍冻不冻，冻就把拍号先减 1 | Tick entry: decide whether this tick is frozen; if so, decrement the tick number by 1 first
-    static struct { uint32_t at, n; int st; } w[8]; static int nw = -1, panel, cur = -1, on; static uint32_t left, calls;
+    static struct { uint32_t at, n; int st; } w[8]; static int nw = -1, panel, cur = -1; static uint32_t left, calls;
     if (nw < 0) { nw = 0; const char *e = getenv("DM_TEST_FREEZE"); char buf[160]; if (e) { strlcpy(buf, e, sizeof buf); for (char *sv, *t = strtok_r(buf, ";", &sv); t && nw < 8; t = strtok_r(NULL, ";", &sv)) if (sscanf(t, "%u:%u", &w[nw].at, &w[nw].n) == 2) nw++; }
         e = getenv("DM_PANEL_FREEZE"); panel = e && e[0] != '0';
-        if (nw || panel) { on = gate_obs_present(OBS_FREEZE_WORLD) && gate_obs_present(OBS_FREEZE_CLIENT) && gate_obs_present(OBS_FREEZE_ANIM) && gate_obs_present(OBS_FREEZE_RENDER);
-            if (on) { gate_obs_set(OBS_FREEZE_WORLD, freeze_world_obs); gate_obs_set(OBS_FREEZE_CLIENT, freeze_client_obs); gate_obs_set(OBS_FREEZE_ANIM, freeze_anim_obs); gate_obs_set(OBS_FREEZE_RENDER, freeze_render_obs); LOG("面板冻结：四个入口门已挂（按面板 %d，时间窗 %d 个）", panel, nw); }
-            else LOG("【红】面板冻结：产物里没有观测门 10–13，不生效"); } }
-    if (!on) return;
+        if (nw || panel) { if (freeze_attach()) LOG("面板冻结：四个入口门已挂（按面板 %d，时间窗 %d 个）", panel, nw); else LOG("【红】面板冻结：产物里没有观测门 10–13，不生效"); } }
+    if (!g_frz_on) return;
     uint32_t t = 0; if (!tk_rd(G + 0x170, &t, 4)) return; int frozen = atomic_load(&g_dm_frozen);
     if (cur < 0 && !frozen) for (int i = 0; i < nw; i++) if (!w[i].st && t >= w[i].at) { cur = i; w[i].st = 1; left = w[i].n; break; }
     if (cur >= 0 && frozen && left && !--left) { w[cur].st = 2; cur = -1; }
-    int want = cur >= 0 || (panel && atomic_load(&g_dm_frz_want));
+    int want = cur >= 0 || (panel && atomic_load(&g_dm_frz_want)) || atomic_load(&g_bgsave);
     if (want && !frozen) { if (t % 20 == 0 || t % 12 == 0 || t % 11 == 0 || t % 1500 == 0) return;   // 晚一拍 | One tick later
         int nm = 0, hp = 0; uint32_t h = frz_snapshot(G, &nm, &hp); atomic_store(&g_frz_by_panel, cur < 0); atomic_store(&g_dm_frozen, 1); frozen = 1; calls = 0; if (mtl_world_frozen) mtl_world_frozen(1); LOG("面板冻结：拍 %u 冻结（%s）；怪 %d 只 校验 %08x 玩家生命 %d", t, cur >= 0 ? "时间窗" : "面板开着", nm, h, hp); }
     else if (!want && frozen) { int nm = 0, hp = 0; uint32_t h = frz_snapshot(G, &nm, &hp); atomic_store(&g_dm_frozen, 0); frozen = 0; if (mtl_world_frozen) mtl_world_frozen(0); LOG("面板冻结：拍 %u 解冻（冻了 %u 次拍入口）；怪 %d 只 校验 %08x 玩家生命 %d", t, calls, nm, h, hp); }
@@ -1881,6 +1945,7 @@ void ticks_install(void) {
     if (gate_obs_present(OBS_TICK)) gate_obs_set(OBS_TICK, tick_gate_product);
     else LOG("【红】产物没有拍入口观测门 OBS_TICK：底栏数字 / 难度条 / 动态 3D 比例（dm_ingame_now）都不工作");
     { module_t *tm = main_mod(); void dm_textbox_install(uint8_t *); if (tm) dm_textbox_install((uint8_t *)tm->base); }   // 普通文字框里的注释颜色码（dm_textbox.c，观测门 14） | Annotation color codes in ordinary text boxes (dm_textbox.c, observation gate 14)
+    { module_t *tm = main_mod(); void dm_turnsmooth_install(uint8_t *); if (tm) dm_turnsmooth_install((uint8_t *)tm->base); }   // 转向回跳平滑 / 模型转身参数读取（dm_turnsmooth.c，观测门 19 / 20） | turn snap-back smoothing / reading the model turning parameters (dm_turnsmooth.c, observation gates 19 / 20)
     if (e || rp || lg || sp) {                              // DM_C2S_LOG 也挂拍入口：系统类消息的拍号要从 G 读 | DM_C2S_LOG also hooks the tick entry: the tick number of system-class messages has to be read from G
         if (!gate_obs_present(OBS_TICK)) die("DM_TICKS / DM_STATE / DM_C2S_REPLAY / DM_C2S_LOG：产物没有拍入口观测门 OBS_TICK（需 r8 起的产物）");
         gate_obs_set(OBS_TICK, tick_gate);

@@ -14,7 +14,8 @@ dm/ios/tools/dm_i18n.py	*
 dm/host/dm_i18n*	*
 dm/ios/tools/annot_strings.py	k j rw1 rw2 kbb vt1
 dm/host/dm_textbox*	k j rw1 rw2 kbb vt1
-dm/host/dm_runeword*	k j rw1 rw2 rwp rwd d
+dm/host/dm_rwlv*	k j rw1 rw2 rwp rwd d rwlv
+dm/host/dm_runeword*	k j rw1 rw2 rwp rwd d rwlv
 dm/host/dm_vault*	vf1 vf2 vt1 pg1 pg2 c s sb t u d cb
 dm/host/dm_pages*	pg1 pg2 vt1 c s sb
 dm/ios/tools/wide_stash.py	vf1 vf2 vt1 pg1 pg2 c s sb t u d cb
@@ -52,6 +53,7 @@ dm/host/dm_actions*	a g n
 dm/host/dm_hud*	a f pk bd bdm q g
 dm/host/dm_uiscreen*	a f pk bd q sb
 dm/host/dm_cloudsync*	rf3 e pg2 vt1 v
+dm/host/dm_cloudmerge*	t u s sb vt1 c sa rf3 v
 dm/host/dm_update*	e
 dm/host/dm_custom*	e kbb
 dm/host/hle_charname*	e v
@@ -61,6 +63,7 @@ dm/host/dm_cursor*	a c f g h j m n p q s t u sb cb sl1 sl2 me1 me2 pg2 vt1 rw1 b
 dm/host/hle_touch*	a c f g h j m n p q s t u sb cb sl1 sl2 me1 me2 pg2 vt1 rw1 bd
 dm/host/touch_mac.c	a c j s sb pg2 vt1 rw1
 dm/ios/tools/touch_layout.py	a c f g h j k m n p q s t u sb cb sl1 me1 me2 pg2 vt1 vf1 vf2 rw1 rw2 kba bd pk pvb
+dm/ios/Sources/dm_sharelog.m	shl
 dm/ios/Sources/front_ios.m	a c f g h j m n p q s t u sb cb sl1 sl2 me1 me2 pg2 vt1 rw1 bd pk
 dm/ios/Sources/*	a e pk rf2
 dm/ios/NativeHUD/*	a f pk bd g q

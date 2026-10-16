@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <TargetConditionals.h>
 #include <stdatomic.h>
 #include <math.h>
 
@@ -446,6 +447,7 @@ static _Atomic uint64_t g_ut_xy;                    // 归一化坐标各 16 位
 //   the global flag is cleared along with it, and this click can then select the new one. Confirming does not rely on tapping again; it uses the 「继续」(Continue) button in the layout (sends ToConsoleCharacterOptions, valid at any time).
 static _Atomic int g_cc_open;
 static _Atomic int g_fe_name_open, g_fe_name_tap;   // 起名页开着；点了输入框（重新弹键盘） | Naming page open; the input box was tapped (bring the keyboard up again)
+static _Atomic int g_fe_name_has;   // 起名页开着期间已经填过名字（输入框确认过非空的字，含留空取的随机名） | a name has been filled in while the naming page was open (the input field confirmed non-empty text, including the random name taken when left empty)
 static const char *const k_cc_class[8] = { "Amazon", "Assassin", "Necromancer", "Barbarian", "Paladin", "Sorceress", "Warlock", "Druid" };
 static _Atomic int g_fe_opt_open, g_fe_confirm_open, g_fe_back;
 static _Atomic int g_fe_opt_side;   // 模式页最近一次点的是哪张牌：0 标准（左半屏）1 专家（右半屏） | Which card was tapped most recently on the mode page: 0 Standard (left half of the screen), 1 Hardcore (right half of the screen)
@@ -678,7 +680,15 @@ static int inside_walk(uint64_t w, uint64_t xy, int dep, uint64_t vt_catch) {
     { const char *nm = (const char *)*(uint64_t *)(w + 8);   // 不画东西、只占位的辅助控件不算（名字来自实测：整屏命中、与面板无关） | Helper widgets that draw nothing and only occupy space do not count (names from measurement: full-screen hit, unrelated to panels)
       static const char *skip[] = { "PanelBordersPanel", "ControllerCursorBounds", "ShowItemsPanel", "MiniMenuPanel", "TooltipsPanel", "EmoteWheelPanel", "TransparentBG", "SpriteColoringHelper", "LanguageFontRemapper", "ShowItemsParameters", "ControllerCursorParameters", "MoviePlayer", "AutoMap", "TooltipTextBox" };   // TooltipTextBox：说明框伸到面板外时不算面板（点它 = 点面板外 = 关；mini 技能树页 2/5 被它挡住）   // AutoMap：小地图面板整屏占位（进局后常开） | TooltipTextBox: when the tooltip box extends outside the panel it does not count as a panel (tapping it = tapping outside the panel = close; on the second Mac it blocked 2/5 on the skill tree page)   // AutoMap: the minimap panel is a full-screen placeholder (always open after entering a run)
       if (nm) for (unsigned i = 0; i < sizeof skip / sizeof *skip; i++) if (!strcmp(nm, skip[i])) return 0; }
-    { uint64_t rel = vt - (vt_catch - 0x20c1328);   // 叶子控件，或带子控件的底板类（九宫格底板 0x20b9580、对话框边框 0x20bc048：设置页的 Background 就是带子控件的底板） | A leaf widget, or a backing-type widget with children (nine-slice backing 0x20b9580, dialog border 0x20bc048: the settings page's Background is a backing with children)
+    { uint64_t rel = vt - (vt_catch - 0x20c1328);   // 叶子控件，或带子控件的底板类（九宫格底板 0x20b9580、对话框边框 0x20bc048：设置页的 Background 就是带子控件的底板； | Leaf widgets, or backing classes with children (nine-slice backing 0x20b9580, dialog frame 0x20bc048: the Background of the settings page is a backing with children;
+      // 带子控件的图片 0x20b8650：编年史「查看奖励」页的整页底板 RewardsBg 就是它，原先不算，卡片之间的空处判成「奖励页没盖住」，
+      // 点下去穿到底下的编年史列表 / 分类 / 页签上，列表容器拿到焦点、金框画在奖励页上面（iPhone 15 Pro 截图）。按它自己的矩形算，同叶子图片；
+      // 先查它的子控件、都没中才算它自己——名字要报到最里层（关闭钮按 TouchClose / close 的名字认）
+      // Image widget with children 0x20b8650: the full-page backing RewardsBg of the Chronicle "View Rewards" page is one. It used to be ignored, so empty space between cards was judged "not covered by the rewards page",
+      // and a tap fell through to the Chronicle list / categories / tabs underneath; the list container got focus and its gold frame was drawn over the rewards page (iPhone 15 Pro screenshot). It now counts with its own rect, like a leaf image;
+      // its children are checked first and only if none is hit does it count itself, so the name is reported down to the innermost widget (the close button is recognized by the names TouchClose / close)
+      if (rel == 0x20b8650 && n && ch && n <= 256) { for (uint64_t i = 0; i < n; i++) if (inside_walk(*(uint64_t *)(ch + 8 * i), xy, dep + 1, vt_catch)) return 1;
+          uint64_t fn = *(uint64_t *)(vt + 0x48); if (((int (*)(uint64_t, uint64_t))fn)(w, xy) & 1) { g_inside_name = *(uint64_t *)(w + 8) ? (const char *)*(uint64_t *)(w + 8) : "?"; return 1; } return 0; }
       if (!n || !ch || rel == 0x20b9580 || rel == 0x20bc048) { uint64_t fn = *(uint64_t *)(vt + 0x48); int h = ((int (*)(uint64_t, uint64_t))fn)(w, xy) & 1; if (h) { g_inside_name = *(uint64_t *)(w + 8) ? (const char *)*(uint64_t *)(w + 8) : "?"; return 1; } if (!n || !ch) return 0; } }
     if (n > 256) return 0;
     for (uint64_t i = 0; i < n; i++) if (inside_walk(*(uint64_t *)(ch + 8 * i), xy, dep + 1, vt_catch)) return 1;
@@ -708,6 +718,7 @@ static int ui_inside_panel(module_t *m, uint64_t root, uint64_t xy) {   // 从�
     for (int i = (int)n - 1; i >= 0; i--) { uint64_t p = *(uint64_t *)(ch + 8 * i); if (!p || !*(uint8_t *)(p + 0x50)) continue; const char *nm = (const char *)*(uint64_t *)(p + 8);
         if (nm && !strncmp(nm, "HUD", 3)) continue;   // HUD 各层属于游戏画面，不算面板 | HUD layers belong to the game screen and do not count as panels
         if (nm && !strcmp(nm, "NotificationPanel")) continue;   // 系统提示框不接点击（同 panel_skip） | system notifications do not take taps (same as panel_skip)
+        if (nm && !strcmp(nm, "FocusManager")) continue;   // 焦点金框只是画在被选中控件上的框，不是可点的东西（同 panel_skip）：原先点到金框画着的地方命中「FocusIndicator@FocusManager」，那一下落空 | The focus gold frame is only a frame drawn on the selected widget, not something you can tap (same as panel_skip): before, tapping where the gold frame was drawn hit "FocusIndicator@FocusManager" and the tap went nowhere
         if (inside_walk(p, xy, 1, (uint64_t)m->base + 0x20c1328)) { g_inside_owner = nm ? nm : "?"; return 1; } }
     return 0;
 }
@@ -1017,7 +1028,8 @@ static int ui_classify(module_t *m, uint64_t root, int x, int y, char *hit, size
     // The settings page covers the pause menu, yet the pause menu's buttons still receive clicks (the game's dispatch does not look at who is on top): on a pause menu button and not on a clickable widget of the settings page = covered, do not click (same as "on a button covered by an upper panel").
     // Previously, while the settings page was open the whole pause menu layer was set invisible and written back on close - that is writing to the original game's widgets, violating the no-writes-to-original-widgets rule; changed to blocking here only on a hit
     { uint64_t st = ui_panel(root, "SettingsPanel"), xy = (uint64_t)(uint32_t)x | ((uint64_t)(uint32_t)y << 32);
-      if (st && *(uint8_t *)(st + 0x50) && !click_walk(st, xy, 1, (uint64_t)m->base)) {   // 设置页自己可点的控件照常；点在它的底板 / 列表空处时，游戏会把这一下交给底下的暂停菜单按钮 | The settings page's own clickable widgets work as usual; when the tap is on its backing / empty list space, the game would hand this tap to the pause menu button underneath
+      uint64_t cp = ui_panel(root, "VideoOptionsPanel");   // 自定义页（借的视频页）与设置页并列、不是它的子控件：这一页上的勾选框也算「设置页自己可点的控件」（语言行的「中文」那格正落在暂停菜单按钮的位置上） | The Custom page (the borrowed video page) sits beside the settings page and is not its child: checkboxes on this page also count as "controls of the settings page itself that can be tapped" (the 「中文」 box of the language row lands exactly where the pause menu button is)
+      if (st && *(uint8_t *)(st + 0x50) && !click_walk(st, xy, 1, (uint64_t)m->base) && !(cp && *(uint8_t *)(cp + 0x50) && click_walk(cp, xy, 1, (uint64_t)m->base))) {   // 设置页自己可点的控件照常；点在它的底板 / 列表空处时，游戏会把这一下交给底下的暂停菜单按钮 | The settings page's own clickable widgets work as usual; when the tap is on its backing / empty list space, the game would hand this tap to the pause menu button underneath
           static const char *const pl[] = { "PauseLayoutGarden", "PauseLayout" };
           for (int i = 0; i < 2; i++) { uint64_t pw = ui_panel(root, pl[i]); if (pw && *(uint8_t *)(pw + 0x50) && click_walk(pw, xy, 1, (uint64_t)m->base)) { snprintf(hit, hn, "设置页盖着的暂停菜单按钮（不点，可滚）"); return 11; }   /* 11：这一下不点下去，但从这里起手上下拖照常滚设置页的列表（自定义页各行的文字不是可点控件，玩家多半就在文字上滑） | 11: this tap is not pressed down, but a vertical drag starting here still scrolls the settings page list as usual (the text of the rows on the Custom page is not a clickable widget, and players mostly swipe right on the text) */ } } }
     const char *mn = ""; uint64_t mp = modal_top(m, root, &mn);
@@ -1073,6 +1085,16 @@ static int ui_classify0(module_t *m, uint64_t root, int x, int y, char *hit, siz
             int yy = y + off[i] * vh / 2160; if (yy < 0 || yy >= vh) continue; int tl = ui_top_cover(m, root, x, yy); if (tl < 0) tl = 0;
             for (int k = (int)rn - 1; k >= tl && !th; k--) th = tab_walk(*(uint64_t *)(rch + 8 * k), (uint64_t)(uint32_t)x | ((uint64_t)(uint32_t)yy << 32), 1, (uint64_t)m->base + 0x20ba3a8, &d, &top); } }
     if (th) { atomic_store(&g_tab_delta, d); atomic_store(&g_tab_top, top); snprintf(hit, hn, "页签 %+d%s", d, top ? "（顶部）" : ""); return 2; }
+    // 手柄版技能树的页内分页（防御光环 / 攻击光环…）不是页签条控件，是四个文字框 TextTabK，只认 ZL / ZR：点在第 K 个文字框上 = 按差值走。
+    // 当前页 = TabK 里 Background 可见的那个（「综合技能」那页 Tab3 没有 Background：前三个都不可见就是它）。只在手柄版布局认（触屏版布局的技能树页签是可点的）
+    // The in-page pagination of the gamepad-layout skill tree (Defensive Auras / Offensive Auras ...) is not a tab-bar widget but four text boxes TextTabK that only respond to ZL / ZR: a click on the K-th text box = step by the difference.
+    // The current page = the TabK whose Background is visible (on the "general skills" page Tab3 has no Background: if none of the first three is visible, it is that one). Recognised only in the gamepad layout (in the touch layout the skill tree tabs are clickable)
+    { int dm_padmode_current(void); uint64_t sp = dm_padmode_current() ? ui_find(root, "SkillsTreePanel", 0) : 0;
+      if (sp && *(uint8_t *)(sp + 0x50) && *(uint8_t *)(sp + 0x51)) { int tgt = -1, cur = 3; char nm[16];
+          for (int k = 0; k < 4; k++) { snprintf(nm, sizeof nm, "TextTab%d", k); uint64_t tw = ui_find(sp, nm, 0);
+              if (tw && *(uint8_t *)(tw + 0x50) && (((int (*)(uint64_t, uint64_t))*(uint64_t *)(*(uint64_t *)tw + 0x48))(tw, xy) & 1)) tgt = k;
+              snprintf(nm, sizeof nm, "Tab%d", k); uint64_t tb = k < 3 ? ui_find(sp, nm, 0) : 0, bg = tb ? ui_find(tb, "Background", 0) : 0; if (bg && *(uint8_t *)(bg + 0x50)) cur = k; }
+          if (tgt >= 0) { atomic_store(&g_tab_w, 0); atomic_store(&g_tab_delta, tgt - cur); atomic_store(&g_tab_top, 0); snprintf(hit, hn, "技能树分页 %+d", tgt - cur); return 2; } } }
     { int sx = x, sy = y, sn = ui_snap(m, root, &sx, &sy); if (sn == 6) { snprintf(hit, hn, "盖:%s 不点", g_inside_name); return 6; }
       if (sn == 1) { if (snap_guarded(root, g_click_name)) snap_guard_near(g_click_w, g_click_name, x, y, sx, sy, *(int32_t *)(m->base + 0x211da38), *(int32_t *)(m->base + 0x211da3c));   // 只为留一行本体点数读数 | only to leave one line of readout of the widget body's size in points
           snprintf(hit, hn, " 可点控件 %s", g_click_name); bd_note_skill(m, root, sx, sy); return 0; }
@@ -1925,6 +1947,93 @@ int dm_ui_minimap_rect(float r[4]) { if (!atomic_load(&g_mm_have)) return 0; uin
 // and if the flip waited for the per-frame check of the panel tree in the next frame, the UI would still be laid out centered in the frame the loading screen is removed (in that frame the health globe is at the centered position and the area name is not lifted). -1 = no message received yet, go by the panel tree.
 static _Atomic int g_load_up = -1;
 static uint64_t g_lift_next;
+// 系统提示框（NotificationPanel）的停靠高度分两态。布局里写的是没开面板时的高度（gen_romfs_overlay.py：上提到让开底栏上方的生命 / 法力数值）；
+// 开着大面板时那行数值被面板盖住，上提后的框反而压在背包格子上，所以面板态改停到 NOTE_PANEL_Y（布局单位，同 json 的 y）：大面板底边框那一带，在金币 / 存放那排下面。
+// 大面板 = 下面名单里的界面根直接子可见（NPC 讲话框、对话菜单这类小框不算：那时底栏还在，框要留在上提位）。名单漏了的面板照无面板处理（= 上一版行为）
+// 改的是对象 +0x19c「停靠目标 y」：原版重排（main+0x3d7e1c）按布局把矩形 y 抄进去，每帧更新（main+0x3d7fbc）滑入滑出时按 (1-t)·目标 插值写 +0x74、
+// 自己从不写 +0x19c——所以改它不跟动画抢坐标（用位置守卫改 +0x74 就是被动画每帧盖回）。单位换算：矩形高 +0x7c 对应布局高 244。
+// 写回由我们确定性做（把写 +0x19c 登记成例外的条件；原版控件规则见 tests/native_write_scan.py NATIVE_FIELD_OK）：
+// 我们记下原值，停靠条件一结束——面板关、读取画面开（切场景）、保存并退出、回到前端——当场写回，不靠游戏重排；重排只是第二道保险
+// （现值不是我们上次写的 = 游戏重排过（换模式 / 改分辨率），当新原值）。消息路（dm_ui_on_uimsg）在消息到达那一刻写，每帧路兜着。
+// 保存并退出 / 回到前端之后到下一次进局之前不再停靠（暂停菜单在退出那几帧还挂着，不压住的话下一帧又停回面板态）。
+// 测试开关 DM_TEST_NOTE_PANEL_Y=<单位> 试别的高度
+// The docking height of the system notice box (NotificationPanel) has two states. The layout holds the height with no panel open (gen_romfs_overlay.py: raised out of the way of the life / mana numbers above the bottom bar);
+// with a large panel open that row of numbers is covered by the panel, and the raised box would sit on the inventory cells instead, so in panel state it docks at NOTE_PANEL_Y (layout units, like y in the json): the band of the large panel's bottom frame, below the gold / Store row.
+// Large panel = a root of the list below being a visible direct child (small boxes such as the NPC speech box and dialogue menu do not count: the bottom bar is still there then, and the box stays in the raised position). A panel missing from the list is treated as no panel (= the previous behaviour)
+// What is changed is the object's +0x19c "docking target y": the original relayout (main+0x3d7e1c) copies the rectangle y into it from the layout, and the per-frame update (main+0x3d7fbc) writes +0x74 interpolated as (1-t)*target during slide-in / slide-out,
+// never writing +0x19c itself - so changing it does not fight the animation for the position (changing +0x74 with a position guard just gets overwritten by the animation every frame). Unit conversion: rectangle height +0x7c corresponds to layout height 244.
+// Writing back is done deterministically by us (the condition for registering writes to +0x19c as an exception; the rule for original widgets is in tests/native_write_scan.py NATIVE_FIELD_OK):
+// we record the original value, and as soon as the docking condition ends - panel closed, loading screen open (scene change), save and exit, back to the front end - it is written back on the spot, without relying on the game's relayout; the relayout is only a second safety net
+// (current value is not what we last wrote = the game relaid it out (mode change / resolution change), taken as the new original). The message path (dm_ui_on_uimsg) writes the moment the message arrives; the per-frame path covers the rest.
+// After save and exit / back to the front end, no docking until the next time a game is entered (the pause menu is still up for those few frames of exiting; without holding it, the next frame would dock to the panel state again).
+// Test switch DM_TEST_NOTE_PANEL_Y=<units> tries another height
+#define NOTE_PANEL_Y -310
+// 停靠目标切换的那一刻框已停稳（+0x198 显示中、矩形 y +0x74 正等于旧目标）：原版停稳时不再写坐标，只改 +0x19c 它会一直留在旧位置——
+// 开面板时压着背包格、关面板时压着底栏数值（两个方向都被退回过）。所以两个方向都顺手把 +0x74 一次写成新目标（登记的第二处例外，
+// 只许 note_dock_snap 写）。滑入滑出期间 +0x74 不等于旧目标、不写；滑出刚开始那一帧即使相等，之后的插值用的也是已改的 +0x19c，同向不打架。
+// 写完下一帧核：+0x74 还是新目标 = 没在动画期写；被改了记红（g_nd_ychk）
+// At the moment the docking target switches, the box has already settled (+0x198 showing, rectangle y +0x74 exactly equal to the old target): once settled the original no longer writes the position, and changing only +0x19c leaves it at the old place -
+// over the inventory cells when a panel opens, over the bottom-bar numbers when it closes (both directions were sent back). So both directions also write +0x74 to the new target in one go (the second registered exception,
+// written only by note_dock_snap). During slide-in / slide-out +0x74 is not equal to the old target, so nothing is written; even if equal on the first frame of slide-out, the interpolation after that uses the already changed +0x19c, so they move the same way.
+// Check on the next frame after writing: +0x74 still the new target = not written during animation; if it was changed, log red (g_nd_ychk)
+static _Atomic uint64_t g_tip_fr; static int32_t g_tip_box[4];   // 说明框：最近一次提交的出图帧号、估算矩形 x0 y0 x1 y1（界面坐标；tip_note 写、ui_note_dock_pump 读，都在游戏主线程） | Description box: present frame number of the last submission and estimated rectangle x0 y0 x1 y1 (UI coordinates; written by tip_note, read by ui_note_dock_pump, both on the game main thread)
+static uint64_t g_nd_w; static int32_t g_nd_orig, g_nd_mine; static int g_nd_on = -1, g_nd_hold;   // g_nd_hold：1 = 退出中（等出局），2 = 已出局（等进局） | g_nd_hold: 1 = leaving (waiting to be out of the game), 2 = out of the game (waiting to enter)
+static int g_nd_ychk; static int32_t g_nd_ywant; static unsigned g_nd_ywr, g_nd_ybad;   // 写过 +0x74 待下一帧核（核它还是 g_nd_ywant）；累计写入次数 / 动画期写入（被改）次数 | +0x74 was written, check it next frame (that it is still g_nd_ywant); total writes / writes during animation (overwritten)
+static int note_dock_snap(uint64_t w, int32_t from, int32_t to) {   // 框已停稳在 from：矩形 y 一次写成 to。返回 1 = 写了 | the box has settled at from: write the rectangle y as to in one go. Returns 1 = written
+    int32_t *ry = (int32_t *)(w + 0x74); if (!*(uint8_t *)(w + 0x198) || *ry != from || from == to) return 0;
+    *ry = to; g_nd_ychk = 1; g_nd_ywant = to; g_nd_ywr++; return 1;
+}
+static void note_dock_restore(uint64_t root, const char *why) {   // 只许游戏主线程 | game main thread only
+    uint64_t w = root ? ui_find(root, "NotificationPanel", 0) : 0; if (!w || w != g_nd_w) return;   // 不在树里 / 不是记下的那个对象：不碰 | not in the tree / not the object we recorded: do not touch
+    int32_t *t = (int32_t *)(w + 0x19c);
+    if (*t == g_nd_mine && g_nd_mine != g_nd_orig) {
+        *t = g_nd_orig; int still = note_dock_snap(w, g_nd_mine, g_nd_orig);
+        static int lg; if (lg++ < 60) LOG("提示框停靠：%s → 写回原值 y %d%s", why, g_nd_orig, still ? "（框已停稳，矩形 y 一并写回）" : ""); }
+    g_nd_mine = *t; g_nd_on = 0;
+}
+static void ui_note_dock_pump(uint64_t root) {
+    static const char *const big[] = { "PlayerInventoryExpansionLayout", "SkillsTreePanel", "CharacterStatsPanel", "QuestLogPanelExpansion", "BankExpansionLayout", "HoradricCubeLayout",
+        "WaypointsPanelExpansion", "VendorPanelLayout", "HirelingInventoryPanel", "ImbueItemsPanel", "ChroniclePanel", "MessageLogPanel", "PauseLayout", "PauseLayoutGarden",
+        "SettingsPanel", "SoundOptionsPanel", "VideoOptionsPanel", "GameplayOptionsPanel" };
+    static int py = 1;
+    if (py > 0) { const char *e = getenv("DM_TEST_NOTE_PANEL_Y"); py = e ? atoi(e) : NOTE_PANEL_Y; }
+    // 退出到前端后的挂起状态先推进、再找提示框：前端界面树里没有提示框控件，放在「找不到就返回」后面的话「已出局」那一步永远推进不到，
+    // 再进局时还卡在「退出中」、停靠整局失效（查出：Mac App 启动时游戏自己发一次回到前端，停靠在 Mac 上从没生效；iOS 保存并退出再进局后同样失效）
+    // Advance the pending state after exiting to the front end first, then look for the notice box: the front-end UI tree has no notice box widget, so placing this after "return if not found" means the "left game" step never advances,
+    // and on re-entering the game it is still stuck in "exiting", breaking docking for the whole run (found in testing: the game itself returns to the front end once when the Mac App starts, so docking never worked on Mac; on iOS it also broke after save and exit then re-entering the game)
+    int ing = dm_uiscreen_ingame(); if (g_nd_hold == 1 && !ing) g_nd_hold = 2; else if (g_nd_hold == 2 && ing) g_nd_hold = 0;
+    uint64_t w = ui_find(root, "NotificationPanel", 0);
+    if (!w) { g_nd_w = 0; return; }
+    int32_t *t = (int32_t *)(w + 0x19c), h = *(int32_t *)(w + 0x7c);
+    if (g_nd_ychk) { g_nd_ychk = 0; int32_t y = *(int32_t *)(w + 0x74); static int lg;
+        if (w != g_nd_w) { if (lg++ < 60) LOG("提示框停靠：写回矩形 y 后提示框对象已换（出局 / 重建），不核"); }
+        else if (y != g_nd_ywant) { g_nd_ybad++; LOG("【红】提示框停靠：矩形 y 写成 %d 后下一帧被改成 %d（动画期写入，第 %u 次）", g_nd_ywant, y, g_nd_ybad); }
+        else if (lg++ < 60) LOG("提示框停靠：停稳的框下一帧在 y %d（%s；矩形 y 写入第 %u 次，动画期 %u 次）", y, y == g_nd_orig ? "原位" : "面板态位", g_nd_ywr, g_nd_ybad); }
+    if (w != g_nd_w || *t != g_nd_mine) { g_nd_w = w; g_nd_orig = *t; g_nd_mine = *t; }
+    int panel = 0; uint64_t ch = *(uint64_t *)(root + 0x58), n = *(uint64_t *)(root + 0x60);   // 名单里的面板在屏上（可见且有可见内容）= 面板态；两种模式通用 | a panel on the list is on screen (visible and with visible content) = panel state; same for both modes
+    for (uint64_t j = 0; ing && !g_nd_hold && j < n && !panel; j++) { uint64_t c = *(uint64_t *)(ch + 8 * j); const char *nm = c ? (const char *)*(uint64_t *)(c + 8) : NULL;
+        if (!nm || !*(uint8_t *)(c + 0x50)) continue;
+        for (unsigned i = 0; i < sizeof big / sizeof *big && !panel; i++) panel = !strcmp(nm, big[i]) && has_visible_leaf(c, 1); }
+    int32_t pv = h > 0 ? (int32_t)lroundf(py * h / 244.0f) : g_nd_orig;
+    // 说明框开着时提示框不压它（iOS / Mac 同一条）：面板态下这一帧或上一帧提交过说明、估算矩形与提示框相交，就把提示框挪到说明框正上 / 正下
+    // （离原位近、又不出屏的那侧），说明框没了回原位。提示框中心 y = 界面高 + 目标 × 界面高 / 2160、半高 = 矩形高 × 界面高 / 4320、半宽 = 矩形宽 × 界面高 / 4320（布局单位，界面高对应 2160）
+    // While the description box is open the notice box does not cover it (same for iOS / Mac): in panel state, if a description was submitted this frame or the previous one and the estimated rectangle intersects the notice box, move the notice box directly above / below the description box
+    // (the side closer to the original position that stays on screen); return to the original position when the description box is gone. Notice box center y = UI height + target × UI height / 2160, half height = rect height × UI height / 4320, half width = rect width × UI height / 4320 (layout units, UI height corresponds to 2160)
+    { module_t *mm = main_module(); int UW = mm ? *(int32_t *)(mm->base + 0x211da38) : 0, UH = mm ? *(int32_t *)(mm->base + 0x211da3c) : 0; uint64_t fr = dm_guest_frame(), tf = atomic_load(&g_tip_fr);
+      static int moved; int32_t rw = *(int32_t *)(w + 0x78);
+      if (panel && UH > 0 && h > 0 && rw > 0 && tf && fr - tf <= 2) {
+          int cy = UH + (int)lroundf((float)pv * UH / 2160.0f), hh = (int)lroundf((float)h * UH / 4320.0f), hw = (int)lroundf((float)rw * UH / 4320.0f), gap = UH / 90;
+          const int32_t *b = g_tip_box; int hit = UW / 2 - hw < b[2] && UW / 2 + hw > b[0] && cy - hh < b[3] + gap && cy + hh > b[1] - gap;
+          if (hit) { int up = b[1] - gap - hh, dn = b[3] + gap + hh, ok_up = up - hh >= 0, ok_dn = dn + hh <= UH;
+              int to = ok_up && ok_dn ? (abs(up - cy) <= abs(dn - cy) ? up : dn) : ok_up ? up : ok_dn ? dn : cy;
+              if (to != cy) { pv = (int32_t)lroundf((float)(to - UH) * 2160.0f / UH); if (!moved) { moved = 1; LOG("提示框停靠：说明框占 (%d,%d)–(%d,%d) 压到提示框（中心 y %d）→ 挪到说明框%s，中心 y %d", b[0], b[1], b[2], b[3], cy, to < cy ? "上方" : "下方", to); } } }
+          else moved = 0; }
+      else if (moved) { moved = 0; LOG("提示框停靠：说明框没了 → 回面板态位"); } }
+    if (!(panel && pv > g_nd_orig)) { if (g_nd_on) note_dock_restore(root, ing ? "面板关了" : "不在局内"); }   // 只往下挪：布局本来就不低于面板态高度时不动 | only move it down: if the layout is already no higher than the panel-state height, leave it
+    else if (*t != pv) { int32_t was = *t; *t = pv; g_nd_mine = pv;
+        if (note_dock_snap(w, was, pv)) { static int lg; if (lg++ < 60) LOG("提示框停靠：目标换成 %d 时框已停稳在 y %d，矩形 y 一并写成新目标", pv, was); } }
+    if (panel != g_nd_on) { g_nd_on = panel; static int lg; if (lg++ < 40) LOG("提示框停靠：%s，目标 y %d（布局原值 %d，矩形高 %d）", panel ? "面板态" : "无面板", *t, g_nd_orig, h); }
+}
 static void ui_lift_pump(uint64_t root, uint64_t fr) {
     if (fr < g_lift_next) return; g_lift_next = fr + 6;
     int x, y, w, h; dm_ui_rect(&x, &y, &w, &h); int lift = h > 0 && dm_uiscreen_ingame() ? (int)((long)y * 2160 / h) : 0;
@@ -2261,6 +2370,72 @@ int dm_ui_panel_resident(const char *name) {
         "CandidateListPanel" };
     if (!name) return 0; for (unsigned i = 0; i < sizeof k / sizeof *k; i++) if (!strcmp(name, k[i])) return 1; return 0;
 }
+// 面板开合栈（前端「面板模式」的依据，原在 front_ios.m hud_stack_message；搬来，iOS 前端与 Mac touch_mac.c 在各自的界面消息回调里调同一份）。
+// 底部 UI v4 的 UIKit 底栏只在「局内常态」画：维护面板开合栈，常驻 HUD 层（dm_ui_panel_resident）之外任何面板开着就不画、前端进面板态。
+// 返回栈读数：开着的非常驻面板数；只开着 NPC 对话菜单 / 说话框时 -1。日志字样「[hud] 面板栈 …」保持原样（回归脚本按它认）
+// Panel open/close stack (the basis of the front end's "panel mode"; formerly front_ios.m hud_stack_message, moved here so the iOS front end and Mac touch_mac.c call the same one from their UI message callbacks).
+// The UIKit bottom bar of bottom UI v4 is only drawn in the normal in-game state: maintain the panel stack; whenever any panel other than the resident HUD layers (dm_ui_panel_resident) is open, it is not drawn and the front end enters panel mode.
+// Returns the stack reading: number of open non-resident panels; -1 when only the NPC dialog menu / speech box is open. The log text "[hud] 面板栈 ..." is kept as is (regression scripts match on it)
+enum { HUD_STACK_MAX = 64 };
+static struct { char name[64]; int open; } g_hud_stack[HUD_STACK_MAX];
+static void hud_stack_update(const char *act, const char *arg) {
+    // 读取画面撤下：清掉此刻在游戏面板树里已经看不见的记录（防只开不关的漏配），屏上还在的照记——
+    // 通关页是读取画面撤下前 0.5 秒开的（OpenExclusivePanel EndScreenPanelExpansion → UnloadPanel LoadScreenPanel），原先整栈清零把它也清了：
+    // 底栏和技能钮盖在通关页上、点「好」变成点世界
+    // Loading screen removed: clear the records no longer visible in the game's panel tree at this moment (guards against open-without-close mismatches), and keep those still on screen --
+    // the game-completion page is opened 0.5 seconds before the loading screen is removed (OpenExclusivePanel EndScreenPanelExpansion → UnloadPanel LoadScreenPanel); previously the whole stack was zeroed, clearing it too:
+    // the bottom bar and skill buttons covered the game-completion page, and tapping 「好」(OK) became a world tap
+    if(!strcmp(act,"UnloadPanel") && !strcmp(arg,"LoadScreenPanel")) {
+        for(int i=0;i<HUD_STACK_MAX;i++) {
+            if(g_hud_stack[i].open>0 && strcmp(g_hud_stack[i].name,"LoadScreenPanel") && dm_ui_panel_shown(g_hud_stack[i].name)) fprintf(stderr,"[hud] 面板栈 读取画面撤下：%s 屏上还在，照记\n",g_hud_stack[i].name);
+            else memset(&g_hud_stack[i],0,sizeof g_hud_stack[i]);
+        }
+    }
+    else if(!strcmp(act,"UnloadAll")) memset(g_hud_stack,0,sizeof g_hud_stack);
+    else {
+        // PanelManager 的面板动作全集（读码：它的消息分发 main+0xb1dc60 只认这 8 个，与全部日志里出现过的一致）：
+        //   OpenPanel / OpenExclusivePanel = 开；ClosePanel / UnloadPanel = 关（读取画面那条见上）；TogglePanel = 按当前记录翻转（高级属性页走它）；
+        //   UnloadAll = 全清（见上）；LoadPanel = 预载、不上屏，不算开关；HideGameInfo = 隐藏游戏信息层，与面板开关无关
+        // Full set of PanelManager panel actions (from reading the code: its message dispatch main+0xb1dc60 only recognizes these 8, matching what has appeared across all logs):
+        //   OpenPanel / OpenExclusivePanel = open; ClosePanel / UnloadPanel = close (for the loading screen one see above); TogglePanel = flip according to the current record (the advanced stats page uses it);
+        //   UnloadAll = clear all (see above); LoadPanel = preload without showing, not counted as open or close; HideGameInfo = hide the game info layer, unrelated to panel open / close
+        int tog=!strcmp(act,"TogglePanel");
+        int open=!strcmp(act,"OpenPanel")||!strcmp(act,"OpenExclusivePanel"), close=!strcmp(act,"ClosePanel")||!strcmp(act,"UnloadPanel");
+        if(!open && !close && !tog) return;
+        if(dm_ui_panel_resident(arg)) return;
+        int slot=-1; for(int i=0;i<HUD_STACK_MAX;i++) if(!strcmp(g_hud_stack[i].name,arg)) { slot=i; break; }
+        if(slot<0) for(int i=0;i<HUD_STACK_MAX;i++) if(!g_hud_stack[i].name[0]) { slot=i; strlcpy(g_hud_stack[i].name,arg,sizeof g_hud_stack[i].name); break; }
+        if(slot<0) return;
+        if(tog) { open=g_hud_stack[slot].open<=0; close=!open; }
+        // 没开着就收到关闭 = 空操作，不是漏配：游戏开功能页 / 切页签时对一批互斥面板（仓库、方块、商店、小站、对话…）统一发 ClosePanel，不管开没开；
+        // 启动时选角页也是先关再开（读界面消息流水；之前记成红，玩家路径每次启动 14 条假红）。真漏接了打开的后果是底栏不让开，由下面 60 秒巡检兜
+        // A close received while not open = no-op, not a missing mapping: when opening a function page / switching tabs the game sends ClosePanel to a batch of mutually exclusive panels (storage, cube, shop, waypoint, dialog…) regardless of whether they are open;
+        // at launch the character select page is also closed first and then opened (from reading the UI message log; previously logged as a failure, 14 false failures per launch on the player path). The consequence of really missing an open is the bottom bar not yielding, which the 60-second patrol below covers
+        if(close && g_hud_stack[slot].open<=0) return;
+        // 按「开 / 没开」记，不按次数累加：游戏对已经开着的面板再发一次 OpenPanel 是常态——雇佣列表上的替换确认框每被关掉一次，
+        // 就重发一次 OpenPanel HireMenuPanel（中间没有关闭），而整段对话结束时只发固定次数的关闭。按次数加的话多出确认框两回再雇成，计数留在 1：
+        // 屏上已没有面板，前端却一直按面板态（没摇杆、没技能钮、点哪里都是「面板外」）。809 份日志里计数到过 2 以上的只有 4 个面板
+        // （主菜单链接、选角页、起名候选栏、雇佣列表），没有一个是真叠两层要关两次的。dm_tc_navigation 那一路本来就是幂等位图，两路口径一致了
+        // Recorded as "open / not open", not accumulated by count: the game sending OpenPanel again for an already open panel is normal -- each time the replacement confirmation box on the hire list is dismissed,
+        // OpenPanel HireMenuPanel is sent again (with no close in between), while at the end of the whole dialog only a fixed number of closes is sent. Adding by count, when the confirmation box comes up two extra times and the hire then succeeds, leaves the count at 1:
+        // no panel left on screen, yet the front end stays in panel mode (no stick, no skill buttons, every tap is "outside the panel"). Across 809 logs only 4 panels ever reached a count of 2 or more
+        // (main menu links, character select page, naming candidate bar, hire list), and none of them was a real two-layer stack needing two closes. The dm_tc_navigation path was already an idempotent bitmap, so the two paths now agree
+        if(open && g_hud_stack[slot].open>0) { fprintf(stderr,"[hud] 面板栈 %s %s：已经开着，不重复计\n",act,arg); return; }
+        g_hud_stack[slot].open=open?1:0;
+        fprintf(stderr,"[hud] 面板栈 %s %s → %d\n",act,arg,g_hud_stack[slot].open);
+    }
+}
+int dm_hud_stack_msg(const char *act, const char *arg) {
+    hud_stack_update(act, arg);
+    // NPC 对话菜单（交谈 / 交易…那一小列）不挡底栏：只开着它时底栏照常显示（否则 UIKit 层让开、露出游戏层那份底栏，难度格和回城书不见、腰带样子也变）。
+    // 编码进同一个数：对话菜单开着且没有别的面板 → -1（底栏不让开、且免除导航态的隐藏）
+    // The NPC dialog menu (the small column of Talk / Trade…) does not block the bottom bar: with only it open the bottom bar shows as usual (otherwise the UIKit layer yields and exposes the game layer's bottom bar; the difficulty cell and Tome of Town Portal disappear and the belt looks different too).
+    // Encoded into the same number: dialog menu open with no other panel → -1 (the bottom bar does not yield, and navigation-mode hiding is waived)
+    int n=0, dlg=0; for(int i=0;i<HUD_STACK_MAX;i++) { if(!strcmp(g_hud_stack[i].name,"NpcDialogPanel")||!strcmp(g_hud_stack[i].name,"ScrollSpeechPanel")) dlg|=g_hud_stack[i].open>0; else n+=g_hud_stack[i].open; }   // ScrollSpeechPanel = NPC 说话的滚动文字框（屏幕上方一小块），同样不挡底栏 | ScrollSpeechPanel = the scrolling text box of NPC speech (a small block at the top of the screen); it likewise does not block the bottom bar
+    if(!n && dlg) n=-1;
+    return n;
+}
+void dm_hud_stack_dump(void) { for (int i = 0; i < HUD_STACK_MAX; i++) if (g_hud_stack[i].open) fprintf(stderr, "%s×%d ", g_hud_stack[i].name, g_hud_stack[i].open); }   // 开着的记录（巡检日志用） | Records currently open (for the patrol log)
 static struct { char name[48]; int open; } g_pm[48];   // 界面消息上开着的非常驻面板 | Non-persistent panels that are open per the UI messages
 static void ui_panel_note(const char *act, const char *arg) {   // 界面消息回调里调（游戏主线程） | Called from the UI message callback (game main thread)
     if (!strcmp(act, "UnloadAll")) { memset(g_pm, 0, sizeof g_pm); return; }
@@ -2417,15 +2592,76 @@ static void ui_panel_state_pump(uint64_t root) {   // 游戏主线程，每帧 |
 //   触屏专属（带 if (tm)）：请求全部来自触摸手势——点世界 / 佣兵头像、长按取物、双击使用、点货买、拖放、点技能绑定、副手组页签、开佣兵页。
 //     手柄模式与切换事务进行中不跑；在途的请求由切换清理作废（dm_ui_cache_mode_leave）。
 //   两种模式都跑：ui_target_pump（鉴定目标，含手柄按住 A）、ui_item_pump（命中查询，宿主自己也问）、ui_ptr_pump（指针事件，宿主合成的点击也走）、
-//     ui_safe_pump / ui_lift_pump / ui_trove_tabs_pump / ui_minimap_pump / ui_map_pump / ui_map_geom_pump / ui_map_center（屏幕几何，与输入方式无关）、ui_boss_pct_pump、ui_npcdlg_pump、
+//     ui_safe_pump / ui_lift_pump / ui_note_dock_pump / ui_trove_tabs_pump / ui_minimap_pump / ui_map_pump / ui_map_geom_pump / ui_map_center（屏幕几何，与输入方式无关）、ui_boss_pct_pump、ui_npcdlg_pump、
 //     ui_widestash_pump、mv_audit_pump、ui_pages_pump（含手柄 L / R 翻页）、ui_watch_pump、ui_panel_heal、ui_panel_state_pump、rs_pump（一键重开，在前端泵里调）
-// Per-frame pumps fall into two classes by mode (the long line in dm_ui_mouse_pump below; tests/mode_scan.py checks that every pump on that line either has if (tm) or is on this "runs in both modes" list; a new pump in neither fails).
-//   Touch only (with if (tm)): requests all come from touch gestures: tap world / mercenary portrait, long-press pickup, double-tap use, tap-to-buy, drag and drop, tap skill binding, off-hand set tab, open mercenary page.
-//     Not run in controller mode or while a mode switch is in progress; in-flight requests are voided by the switch cleanup (dm_ui_cache_mode_leave).
-//   Both modes: ui_target_pump (identify target, including controller hold A), ui_item_pump (hit query, the host asks too), ui_ptr_pump (pointer events, host-synthesized clicks go through it too),
-//     ui_safe_pump / ui_lift_pump / ui_trove_tabs_pump / ui_minimap_pump / ui_map_pump / ui_map_geom_pump / ui_map_center (screen geometry, independent of input method), ui_boss_pct_pump, ui_npcdlg_pump,
-//     ui_widestash_pump, mv_audit_pump, ui_pages_pump (including controller L / R paging), ui_watch_pump, ui_panel_heal, ui_panel_state_pump, rs_pump (Quick Restart, called from the front-end pump)
+// 物品说明框停靠（观测门 OBS_TOOLTIP，挂在说明框面板的「提交一条说明」函数入口 main+0xb0d560(面板, 文字, 目标矩形左上 x2, 目标矩形宽高 x3, 样式, 文字 2)）。
+// 说明框是即时式的：悬停着的控件每帧重新提交、画完就清，宿主在自己的时机读面板里的记录数一直是 0，所以只能在提交那一刻改输入。
+// 原版把框摆在目标矩形（被点的那一格）正下 / 正上方：长说明（暗金、符文之语，十几行）盖住腰带、戒指、背包中间几列和「存放」钮，要点被盖住的格子得先点别处。
+// 触屏、只开着物品栏一个面板、光标下是物品时：把目标矩形换成对侧那块暗格空板（物品栏外框里、中间区域左右各一块）顶上的一个点——
+// 物品在面板右半停左空板、在左半停右空板，框从上往下排；量字、摆放、推回屏内仍是游戏自己做（离屏幕边的距离走布局里的 screenEdgePadding）。
+// 空板位置按屏高定（面板按屏高缩放）：空板中线离屏幕中线 0.617 × 屏高、顶边 0.117 × 屏高（iPhone 15 Pro 档 2556×1179 截图量：
+// 667 点宽视图里空板 108–180 / 487–558、屏高 307；拿 16:9 截图验算中线 102 落在那张图的空板 60–145 里）。
+// 原先按「屏幕边到面板内框的带子正中」算，只在 16:9 碰巧落在空板里，2.17:1 的 iPhone 上落到面板外框外、贴着屏幕边（iPhone 15 Pro 视频）。
+// 其余一律原样放行：手柄 / 键鼠模式；并排两个面板的页（储藏箱 / 商人 / 魔盒 / 单件槽 / 佣兵页——没有空带）；技能、属性、按钮的说明（光标下不是物品）；世界里的名牌。
+// 只许游戏主线程（门回调就在）。
+// 测试开关 DM_TEST_TIPDOCK=1：不看模式（Mac 宿主是手柄版，用它看效果）；=0：整个关掉
+// The per-frame pumps fall into two classes by mode (the long line in dm_ui_mouse_pump below; tests/mode_scan.py checks that every pump on that line either has if (tm) or is on this "runs in both modes" list; a newly added pump that is in neither is red).
+//   Touch only (with if (tm)): requests all come from touch gestures: tapping the world / mercenary portrait, long-press to pick up, double-tap to use, tap to buy, drag and drop, tapping to bind a skill, the off-hand set tab, opening the mercenary page.
+//     Not run in gamepad mode or while a switch transaction is in progress; requests in flight are cancelled by the switch cleanup (dm_ui_cache_mode_leave).
+//   Run in both modes: ui_target_pump (identify target, including holding A on the gamepad), ui_item_pump (hit queries, the host asks too), ui_ptr_pump (pointer events, host-synthesized clicks go through it as well),
+//     ui_safe_pump / ui_lift_pump / ui_note_dock_pump / ui_trove_tabs_pump / ui_minimap_pump / ui_map_pump / ui_map_geom_pump / ui_map_center (screen geometry, independent of input method), ui_boss_pct_pump, ui_npcdlg_pump,
+//     ui_widestash_pump, mv_audit_pump, ui_pages_pump (including L / R page turning on the gamepad), ui_watch_pump, ui_panel_heal, ui_panel_state_pump, rs_pump (one-tap restart, called from the front end pump)
+// Item description box docking (observation gate OBS_TOOLTIP, on the entry of the description panel's "submit one description" function main+0xb0d560(panel, text, target rect top-left x2, target rect size x3, style, text 2)).
+// The description box is immediate-mode: the hovered widget resubmits it every frame and it is cleared after drawing, so when the host reads the panel at its own time the record count is always 0; the input can only be changed at the moment of submission.
+// The original places the box directly below / above the target rect (the slot that was tapped): long descriptions (uniques, runewords, a dozen lines) cover the belt, rings, the middle columns of the inventory and the Stash button, and you have to tap elsewhere before you can tap a covered slot.
+// On touch, with only the inventory panel open and an item under the cursor: replace the target rect with a point at the top of the dark empty side panel on the opposite side (inside the inventory frame, one on each side of the middle area):
+// an item in the right half of the panel docks on the left panel and vice versa, and the box is laid out downward; measuring the text, placing it and pushing it back on screen are still done by the game (the distance from the screen edge uses screenEdgePadding from the layout).
+// The side panels are positioned by screen height (the panel scales with screen height): panel center line 0.617 x screen height from the screen center line, top edge 0.117 x screen height (measured on an iPhone 15 Pro 2556x1179 screenshot:
+// in a 667-point-wide view the panels span 108–180 / 487–558 with screen height 307; cross-checked on a 16:9 screenshot, center line 102 falls inside that image's panel at 60–145).
+// This used to be computed as "the middle of the band between the screen edge and the panel's inner frame", which only happened to land in the side panel on 16:9; on 2.17:1 iPhones it landed outside the panel frame against the screen edge (iPhone 15 Pro video).
+// Everything else passes through unchanged: gamepad / keyboard and mouse mode; pages with two panels side by side (stash / vendor / Horadric Cube / single-item slot / mercenary page, which have no empty band); descriptions of skills, attributes and buttons (no item under the cursor); name plates in the world.
+// Game main thread only (the gate callback runs there).
+// Test switch DM_TEST_TIPDOCK=1: ignore the mode (the Mac host is the gamepad version; use it to see the effect); =0: turn it off entirely
+static int ui_touch_mode(void);
+// 说明框占的地方（给提示框让位用，见 ui_note_dock_pump）：提交时只有目标矩形和文字，框的大小游戏在提交函数里面量（main+0xb0f998），入口拿不到，
+// 按文字估：行数 = 换行数 + 1，每行 0.038 × 屏高，上下边 0.03 × 屏高（Mac 16:10 截图标定：15 行长说明在 900 高界面里占 515）；
+// 横向以目标中线为中、半宽 0.25 × 屏高（比实测最宽的一行还宽，宁可多让）；纵向照原版：目标正下方放得下就在下、否则在上。界面坐标（与提交参数同一套）
+// Area taken by the description box (for making room for the notice box, see ui_note_dock_pump): at submission there is only the target rectangle and text; the game measures the box size inside the submit function (main+0xb0f998), unreachable from the entry,
+// so it is estimated from the text: lines = newlines + 1, 0.038 × screen height per line, top and bottom margins 0.03 × screen height (calibrated on a Mac 16:10 screenshot: a 15-line description takes 515 in a 900-high UI);
+// horizontally centered on the target center line with half width 0.25 × screen height (wider than the widest measured line; better to give more room); vertically as in the original game: below the target if it fits, otherwise above. UI coordinates (same system as the submit arguments)
+static void tip_note(const uint64_t *regs) {
+    module_t *m = main_module(); if (!m) return; int H = *(int32_t *)(m->base + 0x211da3c); const char *txt = (const char *)(uintptr_t)regs[1]; if (H <= 0 || !txt) return;
+    int n = 1; for (const char *c = txt; *c && n < 64; c++) n += *c == '\n';
+    int tx = (int32_t)regs[2], ty = (int32_t)(regs[2] >> 32), tw = (int32_t)regs[3], th = (int32_t)(regs[3] >> 32), bh = (int)lroundf((0.038f * n + 0.03f) * H), hw = H / 4, cx = tx + tw / 2;
+    int below = ty + th + bh <= H, y0 = below ? ty + th : ty - bh;
+    g_tip_box[0] = cx - hw; g_tip_box[1] = y0; g_tip_box[2] = cx + hw; g_tip_box[3] = y0 + bh; atomic_store(&g_tip_fr, dm_guest_frame());
+}
+static void tip_dock(const uint64_t *regs);
+void dm_ui_tooltip_obs(const uint64_t *regs) { tip_dock(regs); tip_note(regs); }   // 先按触屏规则改停靠目标，再按最终目标记占位 | First change the dock target by touch rules, then record the occupied area by the final target
+static void tip_dock(const uint64_t *regs) {
+    static int force = -2; if (force == -2) { const char *e = getenv("DM_TEST_TIPDOCK"); force = e ? atoi(e) : -1; }
+    if (force == 0 || (force < 0 && !ui_touch_mode())) return;
+    module_t *m = main_module(); uint64_t root = 0; if (!m) return; memcpy(&root, m->base + 0x2f05458, 8); if (!root) return;
+    if (atomic_load(&g_pstate) & (DM_PS_BANK | DM_PS_VENDOR | DM_PS_IMBUE | DM_PS_CUBE | DM_PS_VAULT | DM_PS_DEAD)) return;
+    if (!ui_panel(root, "PlayerInventoryExpansionLayout") || ui_panel(root, "HirelingInventoryPanel")) return;
+    dm_cursor_item_info ci; if (!dm_cursor_item(&ci)) return;
+    int W = *(int32_t *)(m->base + 0x211da38), H = *(int32_t *)(m->base + 0x211da3c); if (W <= 0 || H <= 0) return;
+    int tx = (int32_t)regs[2], tw = (int32_t)regs[3], off = (int)lroundf(0.617f * H); if (W / 2 - off < H / 10) return;   // 空板贴到屏幕边（比 16:9 还窄的屏）就不挪 | If the side panel would touch the screen edge (screens narrower than 16:9), do not move the box
+    int left = tx + tw / 2 >= W / 2, cx = left ? W / 2 - off : W / 2 + off, y = (int)(0.117f * H);
+    uint64_t *r = (uint64_t *)(uintptr_t)regs;   // 门只回写 x0–x8：改 x2 / x3 | the gate writes back only x0-x8: change x2 / x3
+    r[2] = (uint64_t)(uint32_t)cx | (uint64_t)(uint32_t)y << 32; r[3] = 0;
+    static int lg; static int ll = -1; if (ll != left && lg < 40) { ll = left; lg++; LOG("说明框停靠：物品 %s 在面板%s半 → 说明框停到%s侧空板（中线 x %d，顶 y %d；画面 %dx%d）", ci.code, left ? "右" : "左", left ? "左" : "右", cx, y, W, H); }
+}
 static int ui_touch_mode(void) { int dm_padmode_current(void), dm_padmode_busy(void); return !dm_padmode_current() && !dm_padmode_busy(); }
+// Mac App：界面是手柄版（上面答「不是触屏模式」），但真鼠标走的是触屏那套物品手势（touch_mac.c 把鼠标事件喂给触屏状态机）。
+// 只把物品手势的四个执行泵（长按 / 双击使用 / 买 / 拖放）在真鼠标模式下补跑一遍；绑定框、技能页签对调、佣兵页这些改触屏布局的泵不跑。没有请求时这四个什么都不做，手柄玩家不受影响
+// Mac App: the interface is the gamepad layout (the answer above is "not touch mode"), but the real mouse uses the touch layout's item gestures (touch_mac.c feeds mouse events to the touch state machine).
+// Only the four execution pumps of the item gestures (long press / double-click use / buy / drag and drop) are additionally run in real-mouse mode; the pumps that change the touch layout - binding box, skill tab swap, mercenary page - are not run. With no request these four do nothing, so gamepad players are unaffected
+#if TARGET_OS_OSX
+#define UI_MOUSE_ITEM_PUMPS(pm, proot, pw, phh) do { int dm_touch_host_is_live(void), dm_padmode_busy(void); if (!tm && dm_touch_host_is_live() && !dm_padmode_busy()) { ui_long_pump(); ui_use_pump(); ui_buy_pump(pw, phh); ui_drag_pump(pm, proot, pw, phh); } } while (0)
+#else
+#define UI_MOUSE_ITEM_PUMPS(pm, proot, pw, phh) do { } while (0)
+#endif
 void dm_ui_mouse_pump(void) {   // 游戏取手柄处调（hle_hid fill，主线程）；每个出图帧做一次 | called where the game fetches the controller (hle_hid fill, main thread); done once per presented frame
     static uint64_t last_frame = UINT64_MAX; uint64_t fr = dm_guest_frame();
     if (fr == last_frame) return;
@@ -2467,7 +2703,7 @@ void dm_ui_mouse_pump(void) {   // 游戏取手柄处调（hle_hid fill，主线
                 else fix = 0; }
             if (th) { ui_auto_key(th); tnext = fr + 8; } } } }
     { module_t *pm = main_module(); uint64_t proot = 0; if (pm) { memcpy(&proot, pm->base + 0x2f05458, 8); int32_t pw = *(int32_t *)(pm->base + 0x211da38), phh = *(int32_t *)(pm->base + 0x211da3c);
-        static uint64_t pf = UINT64_MAX; if (proot && pw > 0 && phh > 0 && pf != fr) { pf = fr; { static int dd; const char *dn; if (!dd && (dn = getenv("DM_UI_DUMP")) && atomic_load(&g_taps_base) && fr >= atomic_load(&g_taps_base) + (getenv("DM_UI_DUMP_AT") ? atoi(getenv("DM_UI_DUMP_AT")) : 45)) { dd = 1; ui_dump(proot, 0, dn, 0, pm); } } int tm = ui_touch_mode(); if (tm) ui_wtap_pump(pm, proot, pw, phh); if (tm) ui_long_pump(); ui_target_pump(pm, fr); if (tm) ui_use_pump(); if (tm) ui_buy_pump(pw, phh); ui_item_pump(proot, pw, phh); ui_ptr_pump(pm, proot, pw, phh); if (tm) ui_drag_pump(pm, proot, pw, phh); { int lu = atomic_load(&g_load_up); dm_uiscreen_set_ingame(ui_panel(proot, "HUDPanel") && !(lu < 0 ? ui_find(proot, "LoadScreenPanel", 0) != 0 : lu)); } ui_safe_pump(pm, proot, fr); ui_lift_pump(proot, fr); ui_trove_tabs_pump(pm, proot, fr); ui_minimap_pump(pm, proot, pw, phh, fr); ui_map_pump(pm); ui_map_geom_pump(pm, proot); ui_boss_pct_pump(pm, proot); ui_npcdlg_pump(proot); ui_map_center(pm, proot, *(volatile int32_t *)(pm->base + 0x2d5c748)); if (tm) ui_bind_pump(proot, fr); if (tm) swaptab_pump(proot); if (tm) ui_mercpg_pump(pm, proot, fr); ui_widestash_pump(proot); mv_audit_pump(proot, fr); ui_pages_pump(pm, proot); } } }
+        static uint64_t pf = UINT64_MAX; if (proot && pw > 0 && phh > 0 && pf != fr) { pf = fr; { static int dd; const char *dn; if (!dd && (dn = getenv("DM_UI_DUMP")) && atomic_load(&g_taps_base) && fr >= atomic_load(&g_taps_base) + (getenv("DM_UI_DUMP_AT") ? atoi(getenv("DM_UI_DUMP_AT")) : 45)) { dd = 1; ui_dump(proot, 0, dn, 0, pm); } } int tm = ui_touch_mode(); if (tm) ui_wtap_pump(pm, proot, pw, phh); if (tm) ui_long_pump(); ui_target_pump(pm, fr); if (tm) ui_use_pump(); if (tm) ui_buy_pump(pw, phh); ui_item_pump(proot, pw, phh); ui_ptr_pump(pm, proot, pw, phh); if (tm) ui_drag_pump(pm, proot, pw, phh); UI_MOUSE_ITEM_PUMPS(pm, proot, pw, phh); { int lu = atomic_load(&g_load_up); dm_uiscreen_set_ingame(ui_panel(proot, "HUDPanel") && !(lu < 0 ? ui_find(proot, "LoadScreenPanel", 0) != 0 : lu)); } ui_safe_pump(pm, proot, fr); ui_lift_pump(proot, fr); ui_note_dock_pump(proot); ui_trove_tabs_pump(pm, proot, fr); ui_minimap_pump(pm, proot, pw, phh, fr); ui_map_pump(pm); ui_map_geom_pump(pm, proot); ui_boss_pct_pump(pm, proot); ui_npcdlg_pump(proot); ui_map_center(pm, proot, *(volatile int32_t *)(pm->base + 0x2d5c748)); if (tm) ui_bind_pump(proot, fr); if (tm) swaptab_pump(proot); if (tm) ui_mercpg_pump(pm, proot, fr); ui_widestash_pump(proot); mv_audit_pump(proot, fr); ui_pages_pump(pm, proot); } } }
     if (atomic_load(&g_fe_name_open) && atomic_load(&g_ut_phase) == 2) {   // 起名页：点输入框（底板 / 文本框）= 重新弹系统键盘，不发鼠标点击 | naming page: tapping the input box (backplate / text box) = pop up the system keyboard again, no mouse click is sent
         module_t *nm = main_module(); uint64_t nroot = 0; if (nm) memcpy(&nroot, nm->base + 0x2f05458, 8); uint64_t pn = nroot ? ui_find(nroot, "CharacterCreateNamePanel", 0) : 0;
         if (pn && nm) { int32_t w = *(int32_t *)(nm->base + 0x211da38), h = *(int32_t *)(nm->base + 0x211da3c); uint64_t v = atomic_load(&g_ut_xy);
@@ -2624,6 +2860,10 @@ void dm_ui_on_uimsg(const char *cat, const char *act, const char *arg) {
     if (!strcmp(cat, "PanelManager") && arg && !strcmp(arg, "LoadScreenPanel") && (!strcmp(act, "OpenPanel") || !strcmp(act, "UnloadPanel"))) { int up = act[0] == 'O'; atomic_store(&g_load_up, up);
         module_t *pm = main_module(); uint64_t root = 0; if (pm) memcpy(&root, pm->base + 0x2f05458, 8);
         if (root) { dm_uiscreen_set_ingame(!up && ui_find(root, "HUDPanel", 0)); g_lift_next = 0; ui_lift_pump(root, 0); } }
+    { int ex = (!strcmp(cat, "PausePanelMessage") && !strcmp(act, "ExitGame")) || (!strcmp(cat, "FrontEndNavigation") && !strcmp(act, "ToFrontEnd")),
+          ld = !strcmp(cat, "PanelManager") && arg && !strcmp(arg, "LoadScreenPanel") && !strcmp(act, "OpenPanel");
+      if (ex || ld) { module_t *pm = main_module(); uint64_t root = 0; if (pm) memcpy(&root, pm->base + 0x2f05458, 8); if (ex) g_nd_hold = 1;   // 提示框停靠：停靠条件结束，当场写回原值 | notice docking: the docking condition ended, write the original value back on the spot
+          note_dock_restore(root, ex ? (act[0] == 'E' ? "保存并退出" : "回到前端") : "读取画面（切场景）"); } }
     if (!strcmp(cat, "QuestLogPanelMessage") && !strcmp(act, "DialogueFinished")) atomic_store(&g_speech_end, dm_guest_frame());
     if (!strcmp(cat, "PanelManager")) ui_panel_note(act, arg ? arg : "");
     if (!strcmp(cat, "ChroniclePanelMessage") && !strcmp(act, "ToggleChildPanel") && arg && arg[0]) { int c = 0; while (c < 8 && g_chr_child[c][0] && strcmp(g_chr_child[c], arg)) c++; if (c < 8 && !g_chr_child[c][0]) strlcpy(g_chr_child[c], arg, sizeof g_chr_child[c]); }
@@ -2633,7 +2873,7 @@ void dm_ui_on_uimsg(const char *cat, const char *act, const char *arg) {
     if (strcmp(cat, "InputMessage") && strcmp(cat, "MonsterHealth") && strcmp(cat, "PartyPanelMessage")) DM_LAT("ui %s %s %s", cat, act, arg ? arg : "");
     { static const char *at; static int got; if (!got) { got = 1; at = getenv("DM_UI_TAPS_AT"); }
       if (at && !atomic_load(&g_taps_base)) { char k[160]; snprintf(k, sizeof k, "%s:%s", act, arg); if (strstr(k, at)) atomic_store(&g_taps_base, dm_guest_frame() | 1); } }
-    if (!strcmp(cat, "PanelManager") && !strcmp(arg, "CharacterCreateNamePanel")) { int op = !strcmp(act, "OpenPanel"); if (op || !strcmp(act, "ClosePanel") || !strcmp(act, "UnloadPanel")) { atomic_store(&g_fe_name_open, op); if (op) atomic_store(&g_fe_name, 1); } }
+    if (!strcmp(cat, "PanelManager") && !strcmp(arg, "CharacterCreateNamePanel")) { int op = !strcmp(act, "OpenPanel"); if (op || !strcmp(act, "ClosePanel") || !strcmp(act, "UnloadPanel")) { atomic_store(&g_fe_name_open, op); if (op) atomic_store(&g_fe_name_has, 0); if (op) atomic_store(&g_fe_name, 1); } }
     if (!strcmp(cat, "PanelManager") && (!strcmp(arg, "CharacterOptionsPanel") || !strcmp(arg, "ConfirmationModal"))) { int op = !strcmp(act, "OpenPanel"); if (op || !strcmp(act, "ClosePanel") || !strcmp(act, "UnloadPanel")) atomic_store(arg[1] == 'h' ? &g_fe_opt_open : &g_fe_confirm_open, op); }
     if (!strcmp(cat, "PanelManager") && !strcmp(arg, "DeleteCharacterModal")) { if (!strcmp(act, "OpenPanel")) atomic_store(&g_fe_del_open, 1); else if (!strcmp(act, "ClosePanel") || !strcmp(act, "UnloadPanel")) { atomic_store(&g_fe_del_open, 0); atomic_store(&g_del_hold, 0); } }
     if (!strcmp(cat, "PanelManager") && !strcmp(arg, "CharacterCreatePanel")) { if (!strcmp(act, "OpenExclusivePanel") || !strcmp(act, "OpenPanel")) atomic_store(&g_cc_open, 1); else if (!strcmp(act, "ClosePanel") || !strcmp(act, "UnloadPanel")) atomic_store(&g_cc_open, 0); }
@@ -2664,7 +2904,8 @@ static uint64_t ui_find(uint64_t w, const char *name, int dep) {   // 按名字�
 static uint64_t fe_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
 static char g_fe_name_text[64]; static _Atomic uint64_t g_fe_name_ms;   // 键盘交回的名字（写完后才置 g_fe_name_done）；主线程第一次看到交回的时刻 | the name handed back by the keyboard (g_fe_name_done is set only after it is written); the moment the main thread first sees the hand-back
 _Atomic int g_fe_name_no_accept;   // 前端置 1：这次返回的是替玩家抽的随机名（front_ios.m），只填进名字框、不自动「接受」——同原版「随机名字」键，玩家看到名字再自己点创建 | set to 1 by the front end: what is returned this time is a random name drawn for the player (front_ios.m), which is only filled into the name box without an automatic 「接受」(Accept) -- same as the original game's 「随机名字」(Random Name) button, the player sees the name and then taps create themselves
-void dm_ui_text_entered(const char *text) { if (atomic_exchange(&g_fe_name_no_accept, 0)) return; if (text && *text && atomic_load(&g_fe_name_open)) { strlcpy(g_fe_name_text, text, sizeof g_fe_name_text); atomic_store(&g_fe_name_done, 1); } }   // 系统键盘返回（hle_swkbd.c）：起名页输完名字 → 自动「接受」 | system keyboard returns (hle_swkbd.c): name entered on the naming page → automatic 「接受」(Accept)
+int dm_ui_fe_name_wants_input(void) { return atomic_load(&g_fe_name_open) && !atomic_load(&g_fe_name_has); }   // 起名页开着、名字还没填：Mac 键盘的回车这时当「输入名称」（A）而不是「接受」（＋），见 touch_mac.c | naming page open and the name not yet filled in: Return on a Mac keyboard then acts as "Enter Name" (A) instead of "Accept" (+), see touch_mac.c
+void dm_ui_text_entered(const char *text) { if (text && *text && atomic_load(&g_fe_name_open)) atomic_store(&g_fe_name_has, 1); if (atomic_exchange(&g_fe_name_no_accept, 0)) return; if (text && *text && atomic_load(&g_fe_name_open)) { strlcpy(g_fe_name_text, text, sizeof g_fe_name_text); atomic_store(&g_fe_name_done, 1); } }   // 系统键盘返回（hle_swkbd.c）：起名页输完名字 → 自动「接受」 | system keyboard returns (hle_swkbd.c): name entered on the naming page → automatic 「接受」(Accept)
 // 前端要宿主替玩家点一下某个手柄键（任意线程调）：按住 frames 个客体帧后自动松开。目前只有一处用：进局后点一次「显示物品」键（front_ios.m item_labels_on）
 // The front end asks the host to press a controller button once for the player (callable from any thread): held for frames guest frames and then released automatically. Currently used in only one place: pressing the 「显示物品」(Show Items) button once after entering a run (front_ios.m item_labels_on)
 static _Atomic uint64_t g_pulse_mask, g_pulse_until;

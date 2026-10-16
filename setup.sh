@@ -38,6 +38,9 @@ say "$(m "一、这台电脑" "1. This computer")"
 OSV=$(/usr/libexec/PlistBuddy -c "Print ProductVersion" /System/Library/CoreServices/SystemVersion.plist 2> /dev/null)
 if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then ok "$(m "Apple 芯片的 Mac，macOS $OSV" "Apple silicon Mac, macOS $OSV")"
 else bad "$(m "需要 Apple 芯片的 Mac（这台是 $(uname -s) $(uname -m)）" "An Apple silicon Mac is required (this is $(uname -s) $(uname -m))")" "$(m "换一台 Apple 芯片的 Mac 再来" "Use an Apple silicon Mac")"; fi
+# 图形层整个建在 macOS 26 / iOS 26 才有的图形接口（Metal 4）上：macOS 低于 26 时，在这台 Mac 上运行的那几样（Mac App、宿主、图形层单测、Mac 冒烟）编不过也跑不了
+# The graphics layer is built entirely on a graphics interface that exists only from macOS 26 / iOS 26 on (Metal 4): below macOS 26, the things that run on this Mac (the Mac App, the host, the graphics unit tests, the Mac smoke run) neither build nor run
+case "${OSV%%.*}" in ''|*[!0-9]*) ;; *) [ "${OSV%%.*}" -ge 26 ] || note "$(m "这台 Mac 是 macOS ${OSV}：低于 26。Mac App（dm/tools/mac_app.sh）、宿主与图形层单测、Mac 冒烟需要 macOS 26 及以上（用到了 macOS 26 才有的图形接口）。要在这台 Mac 上玩，出老接口版：DM_MAC_M3=1 dm/tools/mac_app.sh（最低 macOS 15.0，见 docs/OLDER_SYSTEMS.zh-CN.md）" "This Mac runs macOS ${OSV}, below 26. The Mac App (dm/tools/mac_app.sh), the host and graphics unit tests and the Mac smoke run need macOS 26 or later (they use a graphics interface that exists only from macOS 26 on). To play on this Mac, build the older-API version: DM_MAC_M3=1 dm/tools/mac_app.sh (minimum macOS 15.0, see docs/OLDER_SYSTEMS.md)")";; esac
 DK=$DM_ROOT; while [ ! -d "$DK" ] && [ "$DK" != / ]; do DK=$(dirname "$DK"); done; FREE=$(df -g "$DK" 2> /dev/null | awk 'NR==2 {print $4}'); WANT=30; [ -d "$GAME" ] && WANT=15
 if [ -n "$FREE" ] && [ "$FREE" -ge "$WANT" ]; then ok "$(m "磁盘剩余 $FREE GB（至少要 $WANT GB）" "$FREE GB free disk space (at least $WANT GB needed)")"
 else bad "$(m "磁盘剩余 ${FREE:-?} GB，不够：工作区要约 12 GB，解游戏包另要约 20 GB" "Only ${FREE:-?} GB free: the workspace needs about 12 GB, extracting the game package about 20 GB more")" "$(m "腾出空间，或用 DM_ROOT=<别的盘上的目录> 换位置" "Free up space, or point DM_ROOT=<a directory on another disk> elsewhere")"; fi
@@ -65,6 +68,14 @@ fi
 tool python3     "生成与验证脚本" "generation and verification scripts" "brew install python"
 DOTNET=$(command -v dotnet || { [ -x "$HOME/.dotnet/dotnet" ] && echo "$HOME/.dotnet/dotnet"; } || true)
 if [ -n "$DOTNET" ]; then ok "dotnet"; else bad "$(m "缺 dotnet（编译着色器翻译工具）" "dotnet is missing (builds the shader translation tool)")" "brew install dotnet"; fi
+# 编出来的翻译工具是个独立的小程序，启动时要自己找 .NET 运行时：只认 DOTNET_ROOT 和几个固定位置，Homebrew 装的不在其中，找不到就起不来
+#（那时后面会报成「翻译器不是用仓内源编的」，其实是它没跑起来）。没设 DOTNET_ROOT 时，按 dotnet 自己报的运行时位置设上。
+# The translation tool that gets built is a standalone program that has to locate the .NET runtime itself at startup: it only looks at DOTNET_ROOT and a few fixed locations, and a Homebrew install is not among them, so it cannot start
+# (which would later be reported as "the translator was not built from the in-repo source" although it simply did not run). When DOTNET_ROOT is not set, set it from the runtime location dotnet itself reports.
+if [ -n "$DOTNET" ] && [ -z "${DOTNET_ROOT:-}" ]; then
+  DOTNET_ROOT=$("$DOTNET" --list-runtimes 2> /dev/null | sed -n 's/^Microsoft\.NETCore\.App [^ ]* \[\(.*\)\/shared\/Microsoft\.NETCore\.App\]$/\1/p' | head -1)
+  [ -n "$DOTNET_ROOT" ] && export DOTNET_ROOT || unset DOTNET_ROOT
+fi
 
 say "$(m "三、游戏文件（${GAME}）" "3. Game files ($GAME)")"
 gf=0
@@ -117,7 +128,13 @@ packs() {
 }
 [ "$(ls "$DM_ROOT/build/cache/dm/dmsh" 2> /dev/null | wc -l | tr -d ' ')" = 162 ] || step "取着色器包（162 个）" packs
 
-xlate() { "$DOTNET" publish "$HERE/dm/gfx/tools/dmsh_xlate" -c Release -o "$DM_ROOT/build/gfx/dmsh_xlate" -v quiet; }
+xlate() {
+  "$DOTNET" publish "$HERE/dm/gfx/tools/dmsh_xlate" -c Release -o "$DM_ROOT/build/gfx/dmsh_xlate" -v quiet || return 1
+  # 编完当场跑一下：起不来（找不到 .NET 运行时等）就在这里把它自己的报错打出来，不留到后面被报成别的事
+  "$DM_ROOT/build/gfx/dmsh_xlate/dmsh_xlate" --source-sha > /dev/null 2>&1 && return 0
+  echo "  $(m "翻译工具编出来了但起不来，它自己的报错：" "the translation tool was built but does not start; its own error:")"; "$DM_ROOT/build/gfx/dmsh_xlate/dmsh_xlate" --source-sha 2>&1 | head -6 | sed 's/^/    /'
+  echo "  $(m "多半是找不到 .NET 运行时：设 DOTNET_ROOT=<.NET 安装目录> 后重跑（Homebrew：export DOTNET_ROOT=\"\$(brew --prefix dotnet)/libexec\"）" "most likely the .NET runtime was not found: set DOTNET_ROOT=<.NET install directory> and rerun (Homebrew: export DOTNET_ROOT=\"\$(brew --prefix dotnet)/libexec\")")"; return 1
+}
 [ -x "$DM_ROOT/build/gfx/dmsh_xlate/dmsh_xlate" ] || step "编译着色器翻译工具" xlate
 
 # 翻译链版本由源码与工具指纹共同决定。本机工具与仓内登记的不一样（别的 Xcode / spirv-cross 版本、自己编的翻译工具）是正常的：
@@ -167,3 +184,4 @@ echo "      source $DM_ROOT/build/cache/dm/venv/bin/activate"
 echo "  然后出 App：cd dm/ios && ./run.sh build（先在 dm/ios/local.env 里填 DM_TEAM_ID 与 DM_BUNDLE_ID；缺省同时面向 iPhone 与 iPad，只要 iPhone 加 DM_DEVICE_FAMILY=1）"
 echo "  Next, enter the Python environment setup prepared (the build and test scripts need the packages in it):  source $DM_ROOT/build/cache/dm/venv/bin/activate"
 echo "  Then build the app:  cd dm/ios && ./run.sh build   (fill DM_TEAM_ID and DM_BUNDLE_ID in dm/ios/local.env first; it targets both iPhone and iPad by default, add DM_DEVICE_FAMILY=1 for iPhone only)"
+echo "  $(m "想在这台 Mac 上直接玩：dm/tools/mac_app.sh 出一个 macOS App（见 docs/MAC.zh-CN.md）" "To play on this Mac directly: dm/tools/mac_app.sh builds a macOS App (see docs/MAC.md)")"

@@ -668,6 +668,13 @@ def groups():
     g.item("「综合技能」页长按另一个技能","开绑定框",r"OpenPanel ButtonBindingModal"); g.hold(301,114,1.3); g.shot()
     g.tap(P(120,200),1.5); g.tap(P(615,17),1.2)
     gs.append(g)
+    # shl 局：暂停菜单「分享诊断日志」。测试开关让分享面板弹出 3 秒后自己收起（真机截不到系统弹层，只读日志）；导出的文件另拷一份到容器 Documents/sharelog_test.txt
+    # shl run: pause menu "Share diagnostic log". A test switch lets the share sheet dismiss itself 3 seconds after it appears (system overlays cannot be captured on a device, only the log is read); the exported file is also copied to Documents/sharelog_test.txt in the container
+    g=G("shl","DM_TEST_SHARELOG_CLOSE=3"); g.sect("sharelog",0); g.enter(); g.tap("@menu",1.4); g.tap(P(551,17))
+    g.item("暂停菜单点「分享诊断日志」","两份日志打成一个文件（本局那份非空）、分享面板弹出",r"诊断日志：已打包 \S+（\d+ 字节：本局 [1-9]\d*、[^\n]*\n(?:[^\n]*\n){0,40}?[^\n]*诊断日志：分享面板已弹出"); g.at("tap_ui MessageLog@PauseLayoutGarden 3",2.5); g.shot()
+    g.item("等 3 秒","分享面板到点自己收起",r"到点收起分享面板"); g.wait(3.0); g.shot()
+    g.item("再点一次「分享诊断日志」","又能打包（上一次收起后没卡在忙状态）",r"诊断日志：已打包"); g.at("tap_ui MessageLog@PauseLayoutGarden 3",5.5); g.shot()
+    gs.append(g)
     # i 局：雇佣兵（第一幕卡夏；第二幕格雷兹是同一个雇佣面板）。最小步骤来自一条真问题：雇佣名单里同一行连点几下、雇成之后面板栈的计数没清，摇杆和技能钮回不来
     # i run: hiring a mercenary (Act 1 Kashya; Act 2 Greiz is the same hire panel). The minimal steps come from a real problem: tapping the same row of the hire list several times, the panel stack count was not cleared after the hire succeeded, and the stick and skill buttons did not come back
     g=G("i","DM_TEST_GOLD=200000 DM_TEST_WORLD_GO=near2:1:c150@200"); g.sect("hire",0); g.enter(1)
@@ -1077,7 +1084,15 @@ def groups():
     LISTOK=r"符文之语：长按[^\n]*→ 清单 [1-9]\d* 行"
     def anyl(p): return lambda s,b: ("通：" if re.search(p,b+s) else "不通：")+"整局日志"
     # rw1：背包里符文齐——长按 1 孔软帽不开清单；长按 2 孔软帽开清单；点清单外关；再长按、点「一键合成」成型，两枚符文离开背包
-    # rw1: all runes are in the inventory - long-pressing the 1-socket cap does not open the list; long-pressing the 2-socket cap opens the list; tapping outside the list closes it; long-press again and tap 「一键合成」(Craft) to form it, and the two runes leave the inventory
+    # rwlv 局：清单里的「需要等级」取底材的需求等级，不是物品等级（线上缺陷：塔盔需求 59、物品等级 79，清单整页显示 79）。
+    # 现场：背包里 7 顶塔盔（uhm，白装孔数随机但逐局相同），长按其中带孔的一顶；2 孔塔盔的首行是「知识」（欧特 21 + 索尔 27）→ max(59, 27) = 59
+    # rw1: all runes in the inventory - a long press on a 1-socket Cap does not open the list; a long press on a 2-socket Cap opens it; a tap outside the list closes it; long press again and tap "Craft" to make it, and the two runes leave the inventory
+    # rwlv run: "required level" in the list takes the base item's required level, not its item level (reported defect: the Spired Helm requires 59 with item level 79, and the whole page of the list showed 79).
+    # Scene: 7 Spired Helms in the inventory (uhm; socket counts of white items are random but the same every run), long press one with sockets; the first row for a 2-socket Spired Helm is Lore (Ort 21 + Sol 27) -> max(59, 27) = 59
+    g=G("rwlv","DM_TEST_GIVE=uhm:2:7@60 DM_TEST_GIVE_INV=1"); g.sect("rwlv",0); g.enter(); g.wait(2.0); g.tap("@menu",1.4)
+    g.item("长按背包里带孔的塔盔","弹清单，需要等级 59（看截图：每行都是 59）",r"长按 uhm[^\n]*需要等级 59",r"长按 uhm[^\n]*需要等级 79|【红】符文之语"); g.hold(395,267); g.wait(1.0); g.shot()
+    g.item("点清单外","清单关掉",r"清单外 → 关清单|清单关闭"); g.tap(P(120,200),1.5); g.shot()
+    gs.append(g)
     g=G("rw1",RWE+" DM_TEST_RW_LIST=75"); g.sect("rw1",0); g.enter(); g.wait(2.0); g.tap("@menu",1.4)
     g.item("背包布局","软帽、符文在 k 局同样的位置（看截图）",None); g.shot()
     g.item("长按 1 孔软帽","不开清单（1 孔帽子没有能做的符文之语）",None,LISTOK); g.hold(376,228); g.wait(1.0); g.shot()
