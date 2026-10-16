@@ -8,11 +8,41 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from display import (MAIN_BUILD_ID, WINDOW_INSTRUCTIONS, WIDE_WORDS, resized_image,
-                     display_images, centered_gui, ui_overlays, widened_vignette)
+                     display_images, centered_gui, ui_overlays, widened_vignette,
+                     widened_ui_data, TRAIT_HUD_INSET_X)
 from inspect_target import FormatError
 
 
 class DisplayTests(unittest.TestCase):
+    def test_trait_hud_backing_icons_and_details_share_safe_area_inset(self):
+        source = (b"ScreenCenterX = 1920/2\r\nScreenWidth = 1920\r\n"
+                  b"CombatUI = {\r\n\tTraitUIStart = 50,\r\n}\r\n"
+                  b"TraitUI = {\r\n\tIconStartX = 27 + 64 - 40,\r\n"
+                  b"\tIconStartY = ScreenCenterY - 240,\r\n}\r\n"
+                  b"HealthUI = { X = 40 }\r\n")
+        with patch("display.UI_DATA_SHA256", hashlib.sha256(source).hexdigest()):
+            changed = widened_ui_data(source)
+            with self.assertRaises(FormatError):
+                widened_ui_data(source + b"changed")
+        self.assertEqual(TRAIT_HUD_INSET_X, 180)
+        self.assertIn(b"\tTraitUIStart = 230,\r\n", changed)
+        self.assertIn(b"\tIconStartX = 27 + 64 - 40 + 180,\r\n", changed)
+        restored = changed.replace(b"ScreenCenterX = 2340/2", b"ScreenCenterX = 1920/2")
+        restored = restored.replace(b"ScreenWidth = 2340", b"ScreenWidth = 1920")
+        restored = restored.replace(b"\tTraitUIStart = 230,", b"\tTraitUIStart = 50,")
+        restored = restored.replace(b"\tIconStartX = 27 + 64 - 40 + 180,",
+                                    b"\tIconStartX = 27 + 64 - 40,")
+        restored = restored.removesuffix(b"\nSaveIgnores.ScreenCenterX = true\nSaveIgnores.ScreenWidth = true\n")
+        self.assertEqual(restored, source)
+        for anchor in (b"\tTraitUIStart = 50,", b"\tIconStartX = 27 + 64 - 40,"):
+            for bad in (source.replace(anchor, b""), source + anchor):
+                with patch("display.UI_DATA_SHA256", hashlib.sha256(bad).hexdigest()):
+                    with self.assertRaises(FormatError):
+                        widened_ui_data(bad)
+        # Current 932pt landscape width: even the original left edge at zero clears 59pt + 8pt.
+        self.assertGreaterEqual(TRAIT_HUD_INSET_X * 932 / 2340, 59 + 8)
+        self.assertAlmostEqual((51 + TRAIT_HUD_INSET_X) - (50 + TRAIT_HUD_INSET_X), 1)
+
     def test_wide_vignette_scales_only_its_horizontal_coverage(self):
         anchor = b'SetAnimation({ Name = "VignetteOverlay", DestinationId = ScreenAnchors.Vignette })'
         source = b"function CreateVignette()\r\n\t" + anchor + b"\r\nend\r\n"
@@ -58,7 +88,8 @@ class DisplayTests(unittest.TestCase):
             script.write_bytes(b"unknown source")
             with self.assertRaises(FormatError):
                 ui_overlays(root, "wide-720p")
-            source = b"ScreenCenterX = 1920/2\nScreenWidth = 1920\n"
+            source = (b"ScreenCenterX = 1920/2\nScreenWidth = 1920\n"
+                      b"\tTraitUIStart = 50,\n\tIconStartX = 27 + 64 - 40,\n")
             script.write_bytes(source)
             room_manager = script.parent / "RoomManager.lua"
             room_source = b'SetAnimation({ Name = "VignetteOverlay", DestinationId = ScreenAnchors.Vignette })'

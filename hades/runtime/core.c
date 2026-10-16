@@ -4,6 +4,7 @@
 #include "threads.h"
 #include "host.h"
 #include "callout.h"
+#include "lifecycle.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
@@ -319,17 +320,15 @@ int hades_ro_command(hades_ro_session *session, unsigned command, uint64_t pid,
 }
 
 uint64_t gate_dispatch(uint64_t ret, uint64_t *registers) {
+    hades_lifecycle_host_enter();
     for (unsigned i = 0; i < hades_gate_count; i++) {
         const hades_gate *gate = &hades_gates[i];
         if (!hades_images[gate->module].loaded
             || ret != (uintptr_t)hades_images[gate->module].base + gate->ret)
             continue;
         if (gate->kind == 1 && gate->arg < 31) {
-            mach_timebase_info_data_t timebase;
-            if (mach_timebase_info(&timebase) != KERN_SUCCESS || !timebase.denom)
-                break;
-            __uint128_t ticks = (__uint128_t)mach_absolute_time() * timebase.numer * 19200000;
-            registers[gate->arg] = (uint64_t)(ticks / ((__uint128_t)timebase.denom * 1000000000));
+            __uint128_t ticks=(__uint128_t)hades_lifecycle_clock_ns()*19200000;
+            registers[gate->arg] = (uint64_t)(ticks / 1000000000);
             return registers[0];
         }
         if (!gate->kind && gate->arg == 0x29 && registers[1] == 11

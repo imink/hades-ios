@@ -2,6 +2,8 @@
 #include "threads.h"
 #include "core.h"
 #include "memory.h"
+#include "lifecycle.h"
+#include "callout.h"
 #include <errno.h>
 #include <pthread.h>
 #include <sched.h>
@@ -30,6 +32,7 @@ static uint64_t priorities, cores;
 static uint64_t sequence;
 static _Thread_local guest_thread *current;
 static _Thread_local sigjmp_buf exit_point;
+void hades_threads_wake_lifecycle(void) { pthread_cond_broadcast(&changed); }
 extern void dm_thread_enter(uint64_t entry, uint64_t argument, uint64_t stack_top);
 
 static int error(const char *message) {
@@ -91,14 +94,11 @@ static void acquire(guest_thread *thread) {
 }
 
 static int block(int64_t timeout, uint64_t *result) {
-    struct timespec now;
     uint64_t deadline = 0;
     if (timeout < -1)
         return error("Invalid key wait timeout");
     if (timeout > 0) {
-        if (clock_gettime(CLOCK_MONOTONIC, &now))
-            return error("Cannot read key wait clock");
-        uint64_t ns = (uint64_t)now.tv_sec * 1000000000 + (uint64_t)now.tv_nsec;
+        uint64_t ns = hades_lifecycle_clock_ns();
         if ((uint64_t)timeout > UINT64_MAX - ns)
             return error("Key wait deadline overflow");
         deadline = ns + (uint64_t)timeout;
@@ -114,9 +114,7 @@ static int block(int64_t timeout, uint64_t *result) {
         }
         struct timespec relative = {0};
         if (timeout > 0 && current->waiting == 2) {
-            if (clock_gettime(CLOCK_MONOTONIC, &now))
-                return error("Cannot read key wait clock");
-            uint64_t ns = (uint64_t)now.tv_sec * 1000000000 + (uint64_t)now.tv_nsec;
+            uint64_t ns = hades_lifecycle_clock_ns();
             if (ns >= deadline) {
                 timeout = 0;
                 continue;
@@ -124,9 +122,8 @@ static int block(int64_t timeout, uint64_t *result) {
             relative.tv_sec = (time_t)((deadline - ns) / 1000000000);
             relative.tv_nsec = (long)((deadline - ns) % 1000000000);
         }
-        int status = timeout > 0 && current->waiting == 2
-            ? pthread_cond_timedwait_relative_np(&changed, &lock, &relative)
-            : pthread_cond_wait(&changed, &lock);
+        int status = hades_lifecycle_wait(&changed,&lock,
+            timeout > 0 && current->waiting == 2 ? &relative : NULL);
         if (status == ETIMEDOUT)
             timeout = 0;
         else if (status)
@@ -175,6 +172,7 @@ static void *run(void *object) {
     int cancel = thread->cancel;
     pthread_mutex_unlock(&lock);
     if (!cancel) {
+        hades_lifecycle_thread_enter();
         if (!sigsetjmp(exit_point, 1)) {
             dm_thread_enter(thread->entry, thread->argument, thread->stack_top);
             error("Guest thread returned instead of ExitThread");
@@ -185,6 +183,7 @@ static void *run(void *object) {
     thread->exited = 1;
     pthread_cond_broadcast(&changed);
     pthread_mutex_unlock(&lock);
+    if (!cancel) hades_lifecycle_thread_leave();
     current = NULL;
     return NULL;
 }
@@ -325,7 +324,7 @@ int hades_thread_svc(unsigned svc, uint64_t *registers) {
         }
         count++;
         while (!thread->ready)
-            if (pthread_cond_wait(&changed, &lock)) {
+            if (hades_lifecycle_wait(&changed, &lock, NULL)) {
                 error("Guest thread creation handshake failed");
                 exit(3);
             }
@@ -339,15 +338,16 @@ int hades_thread_svc(unsigned svc, uint64_t *registers) {
             return error("Main thread ExitThread requires process lifecycle integration");
         }
         pthread_mutex_unlock(&lock);
+#ifdef HADES_HOST_GATE_STACK
+        hades_gate_stack_abandon();
+#endif
         siglongjmp(exit_point, 1);
     } else if (svc == 0x0B) {
         int64_t ns = (int64_t)registers[0];
         pthread_mutex_unlock(&lock);
         if (ns > 0) {
-            struct timespec time = {.tv_sec=ns/1000000000, .tv_nsec=ns%1000000000};
-            while (nanosleep(&time, &time))
-                if (errno != EINTR)
-                    return error("Guest sleep failed");
+            if (hades_lifecycle_sleep((uint64_t)ns))
+                return error("Guest sleep failed");
         } else if (ns >= -2)
             sched_yield();
         else
@@ -375,14 +375,13 @@ int hades_thread_svc(unsigned svc, uint64_t *registers) {
             return error("Guest thread cannot wait for itself");
         }
         int64_t timeout = (int64_t)registers[3];
-        struct timespec now;
         uint64_t deadline = 0;
-        if (timeout < -1 || (timeout > 0 && clock_gettime(CLOCK_MONOTONIC, &now))) {
+        if (timeout < -1) {
             pthread_mutex_unlock(&lock);
             return error("Invalid thread wait timeout or unavailable monotonic clock");
         }
         if (timeout > 0) {
-            uint64_t ns = (uint64_t)now.tv_sec * 1000000000 + (uint64_t)now.tv_nsec;
+            uint64_t ns = hades_lifecycle_clock_ns();
             if ((uint64_t)timeout > UINT64_MAX - ns) {
                 pthread_mutex_unlock(&lock);
                 return error("Thread wait deadline overflow");
@@ -392,11 +391,7 @@ int hades_thread_svc(unsigned svc, uint64_t *registers) {
         while (!thread->exited) {
             struct timespec relative = {0};
             if (timeout > 0) {
-                if (clock_gettime(CLOCK_MONOTONIC, &now)) {
-                    pthread_mutex_unlock(&lock);
-                    return error("Unavailable thread wait clock");
-                }
-                uint64_t ns = (uint64_t)now.tv_sec * 1000000000 + (uint64_t)now.tv_nsec;
+                uint64_t ns = hades_lifecycle_clock_ns();
                 if (ns >= deadline)
                     timeout = 0;
                 else {
@@ -409,8 +404,7 @@ int hades_thread_svc(unsigned svc, uint64_t *registers) {
                 pthread_mutex_unlock(&lock);
                 return 1;
             }
-            int status = timeout > 0 ? pthread_cond_timedwait_relative_np(&changed, &lock, &relative)
-                                     : pthread_cond_wait(&changed, &lock);
+            int status = hades_lifecycle_wait(&changed,&lock,timeout > 0 ? &relative : NULL);
             if (status != 0 && status != ETIMEDOUT) {
                 error("Guest thread exit wait failed");
                 exit(3);

@@ -11,6 +11,8 @@
 #include "action_button.h"
 #include "../runtime/display.h"
 #include "../runtime/core.h"
+#include "../runtime/lifecycle.h"
+#include "../runtime/threads.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <os/proc.h>
 #include <pthread.h>
@@ -121,6 +123,8 @@ static uint32_t renderWidth=1280,renderHeight=720;
 @property(nonatomic, strong) NSArray<UIButton *> *runButtons;
 @property(nonatomic) BOOL running;
 @property(nonatomic) unsigned activeMode;
+@property(nonatomic) BOOL lifecycleConfigured;
+@property(nonatomic) BOOL gamePaused;
 @property(nonatomic, strong) NSArray<UIButton *> *inputButtons;
 @property(nonatomic, strong) HadesJoystick *joystick;
 @property(nonatomic, strong) UIView *gameContainer;
@@ -133,6 +137,9 @@ static uint32_t renderWidth=1280,renderHeight=720;
 @property(nonatomic, strong) UIView *systemMonitor;
 @property(nonatomic, strong) UIButton *monitorClose;
 @property(nonatomic, strong) UITextView *monitorText;
+@property(nonatomic, strong) UIView *loadingView;
+@property(nonatomic, strong) UILabel *loadingLabel;
+@property(nonatomic, strong) UIProgressView *loadingProgress;
 @property(nonatomic) hades_cpu_counter cpuCounter;
 @property(nonatomic) double monitorSampleTime;
 @property(nonatomic) BOOL inputConfigured;
@@ -141,7 +148,26 @@ static uint32_t renderWidth=1280,renderHeight=720;
 @property(nonatomic, strong) HadesSurfaceView *surface;
 #endif
 - (void)executeMode:(unsigned)mode;
+- (BOOL)pauseGame;
+- (void)resumeGame;
 @end
+
+static int lifecycle_transition(int suspended) {
+#ifdef HADES_VULKAN_HOST
+    if (suspended && hades_vulkan_drain_lifecycle()) return -1;
+#endif
+    return hades_ipc_lifecycle_transition(suspended);
+}
+
+static void lifecycle_wake(void) {
+    hades_threads_wake_lifecycle();
+    hades_ipc_wake_lifecycle();
+}
+
+static void lifecycle_checkpoint(void) {
+    hades_lifecycle_host_enter();
+    hades_lifecycle_host_leave();
+}
 
 typedef struct { unsigned mode; void *controller; } HadesWork;
 static void *probe_thread(void *argument) {
@@ -150,7 +176,9 @@ static void *probe_thread(void *argument) {
     @autoreleasepool {
         HadesViewController *controller = (__bridge_transfer HadesViewController *)work->controller;
         free(work);
+        if (mode==3 && controller.lifecycleConfigured) hades_lifecycle_thread_enter();
         [controller executeMode:mode];
+        if (mode==3 && controller.lifecycleConfigured) hades_lifecycle_thread_leave();
         if (mode >= 2)
             for (;;)
                 pause();
@@ -158,7 +186,8 @@ static void *probe_thread(void *argument) {
     return NULL;
 }
 
-static BOOL verify_romfs(NSString *directory, NSString *catalog) {
+static BOOL verify_romfs(NSString *directory, NSString *catalog,
+                        void (^progress)(NSUInteger,NSUInteger)) {
     NSError *error = nil;
     NSDictionary *root = [NSFileManager.defaultManager attributesOfItemAtPath:directory error:&error];
     if (![root[NSFileType] isEqualToString:NSFileTypeDirectory]) {
@@ -172,6 +201,9 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
         return NO;
     }
     NSDictionary *records = decoded;
+    NSUInteger verified=0;
+    double reported=0;
+    if (progress) progress(0,records.count);
     for (NSString *name in records) {
         if (![name isKindOfClass:NSString.class] || ![name hasPrefix:@"RomFS/"])
             return NO;
@@ -206,8 +238,10 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
         CC_SHA256_Init(&context);
         unsigned char buffer[65536], digest[CC_SHA256_DIGEST_LENGTH];
         size_t count;
-        while ((count = fread(buffer, 1, sizeof buffer, file)))
+        while ((count = fread(buffer, 1, sizeof buffer, file))) {
             CC_SHA256_Update(&context, buffer, (CC_LONG)count);
+            lifecycle_checkpoint();
+        }
         int failed = ferror(file);
         if (fclose(file))
             failed = 1;
@@ -218,6 +252,12 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
         if (failed || ![hex isEqualToString:record[@"sha256"]]) {
             fprintf(stderr, "[Hades-iOS] Resource hash/read failure: %s\n", relative.UTF8String);
             return NO;
+        }
+        verified++;
+        double now=CACurrentMediaTime();
+        if (progress && (verified==records.count || now-reported>=.1)) {
+            progress(verified,records.count);
+            reported=now;
         }
     }
     fprintf(stderr, "[Hades-iOS] ROMFS_VERIFIED files=%lu; private USB resources only\n", (unsigned long)records.count);
@@ -292,6 +332,12 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
 }
 - (void)updateFrameRate {
 #ifdef HADES_VULKAN_HOST
+    if (self.loadingView && !self.loadingView.hidden && hades_vulkan_present_count()) {
+        self.loadingView.hidden=YES;
+        self.joystick.enabled=!self.gamePaused;
+        for (UIButton *button in self.inputButtons) button.enabled=!self.gamePaused;
+        fprintf(stderr,"[Hades-iOS] GAME_LOADING_COMPLETE; first presentation submitted, not proof of visible correct gameplay\n");
+    }
     if (self.gameContainer.hidden || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) {
         [self resetFrameRate];
         return;
@@ -311,17 +357,24 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
 #endif
 }
 - (void)runRequestedProbe {
-    if (requestedProbe<0 || self.running || !self.view.window
-        || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive)
+    if (requestedProbe<0 || self.running) return;
+    UIApplicationState state=UIApplication.sharedApplication.applicationState;
+    if (!self.view.window || state!=UIApplicationStateActive) {
+        fprintf(stderr,"[Hades-iOS] STARTUP_DEFERRED mode=%d window=%d application-state=%ld\n",
+            requestedProbe,self.view.window!=nil,(long)state);
         return;
+    }
     unsigned mode=(unsigned)requestedProbe;
     requestedProbe=-1;
-    fprintf(stderr,"[Hades-iOS] EXPLICIT_PROBE mode=%u; core/GPU only, no SDK/game autostart\n",mode);
+    if (mode==3)
+        fprintf(stderr,"[Hades-iOS] GAME_AUTOSTART; normal foreground launch\n");
+    else
+        fprintf(stderr,"[Hades-iOS] EXPLICIT_PROBE mode=%u; diagnostic launch\n",mode);
     [self runMode:mode];
 }
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
-    [self runRequestedProbe];
+    dispatch_async(dispatch_get_main_queue(), ^{ [self runRequestedProbe]; });
 }
 - (void)didReceiveMemoryWarning {
     [super didReceiveMemoryWarning];
@@ -385,9 +438,11 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
         self.systemMonitor.frame=CGRectMake(inset.left+(available-monitorWidth)/2,
             inset.top+64,monitorWidth,monitorHeight);
         self.monitorClose.frame=CGRectMake(8,0,monitorWidth-16,44);
-        self.monitorText.frame=CGRectMake(8,44,monitorWidth-16,monitorHeight-48);
-        self.diagnosticButton.frame=CGRectMake(bounds.size.width/2-32,
-            bounds.size.height-inset.bottom-40,64,32);
+        self.monitorText.frame=CGRectMake(8,44,monitorWidth-16,MAX(0,monitorHeight-92));
+        self.diagnosticButton.frame=CGRectMake(8,monitorHeight-44,monitorWidth-16,40);
+        self.loadingView.frame=bounds;
+        self.loadingLabel.frame=CGRectMake(inset.left+12,bounds.size.height/2-36,available-24,48);
+        self.loadingProgress.frame=CGRectMake(inset.left+available*.2,bounds.size.height/2+24,available*.6,4);
         if (!self.actionHitAreaChecked && self.inputConfigured && !self.gameContainer.hidden
             && bounds.size.width>bounds.size.height) {
             const CGFloat samples[13][2]={{.5,.5},{.1,.5},{.9,.5},{.5,.1},{.5,.9},
@@ -440,13 +495,19 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
         }
         [self.gameContainer addSubview:button];
     }
-    self.diagnosticButton=[UIButton buttonWithType:UIButtonTypeSystem];
-    [self.diagnosticButton setTitle:@"日志" forState:UIControlStateNormal];
-    self.diagnosticButton.backgroundColor=[UIColor.blackColor colorWithAlphaComponent:.5];
-    self.diagnosticButton.tintColor=UIColor.whiteColor;
-    [self.diagnosticButton addTarget:self action:@selector(showDiagnostics) forControlEvents:UIControlEventTouchUpInside];
-    [self.haptics bindActivation:self.diagnosticButton];
-    [self.gameContainer addSubview:self.diagnosticButton];
+    self.loadingView=[UIView new];
+    self.loadingView.userInteractionEnabled=NO;
+    self.loadingView.accessibilityIdentifier=@"hades-game-loading";
+    self.loadingLabel=[UILabel new];
+    self.loadingLabel.text=@"正在校验游戏资源…";
+    self.loadingLabel.numberOfLines=2;
+    self.loadingLabel.textAlignment=NSTextAlignmentCenter;
+    self.loadingLabel.textColor=UIColor.whiteColor;
+    self.loadingLabel.font=[UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
+    self.loadingProgress=[[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+    [self.loadingView addSubview:self.loadingLabel];
+    [self.loadingView addSubview:self.loadingProgress];
+    [self.gameContainer insertSubview:self.loadingView aboveSubview:self.surface];
     self.fpsLabel=[UILabel new];
     self.fpsLabel.font=[UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightSemibold];
     self.fpsLabel.textColor=UIColor.whiteColor;
@@ -483,6 +544,13 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
     self.monitorText.textContainerInset=UIEdgeInsetsZero;
     self.monitorText.accessibilityIdentifier=@"hades-system-monitor-values";
     [self.systemMonitor addSubview:self.monitorText];
+    self.diagnosticButton=[UIButton buttonWithType:UIButtonTypeSystem];
+    [self.diagnosticButton setTitle:@"查看 / 导出本机日志" forState:UIControlStateNormal];
+    self.diagnosticButton.tintColor=UIColor.whiteColor;
+    self.diagnosticButton.accessibilityIdentifier=@"hades-monitor-diagnostics";
+    [self.diagnosticButton addTarget:self action:@selector(showDiagnostics) forControlEvents:UIControlEventTouchUpInside];
+    [self.haptics bindActivation:self.diagnosticButton];
+    [self.systemMonitor addSubview:self.diagnosticButton];
     [self.gameContainer insertSubview:self.systemMonitor belowSubview:self.joystick];
     [self resetFrameRate];
     __weak HadesViewController *weakSelf=self;
@@ -525,7 +593,10 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
     [self releaseControls];
     [self resetFrameRate];
     self.gameContainer.hidden=YES;
+    self.systemMonitor.hidden=YES;
+    self.fpsLabel.accessibilityValue=@"监控已关闭";
     self.diagnosticStack.hidden=NO;
+    self.view.backgroundColor=UIColor.systemBackgroundColor;
     [self refreshLog];
 }
 - (void)showGameSurface {
@@ -533,6 +604,7 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
         [self resetFrameRate];
         self.diagnosticStack.hidden=YES;
         self.gameContainer.hidden=NO;
+        self.view.backgroundColor=UIColor.blackColor;
         [self.view setNeedsLayout];
     }
 }
@@ -548,18 +620,18 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.haptics=[HadesHaptics new];
-    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.view.backgroundColor = requestedProbe==3 ? UIColor.blackColor : UIColor.systemBackgroundColor;
     UILabel *title = [UILabel new];
-    title.text = @"Hades — 真机移植验证";
+    title.text = @"Hades — 本机诊断";
     title.font = [UIFont preferredFontForTextStyle:UIFontTextStyleTitle2];
     UILabel *notice = [UILabel new];
     notice.numberOfLines = 0;
     notice.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
-    notice.text = @"面向 iOS 26 / iPhone 15 Pro Max，仍非已验证可玩版。Mac 原生 GPU 读回与受控按键已验证菜单；完整玩法与真机表现尚未验证。\n需 USB 放入完整 RomFS。采用 2 GiB 诊断堆；GPU/SDK/游戏诊断切后台会终止，未提交进度可能丢失。客体线程暂停及通用库小程序仍未实现。";
+    notice.text = @"正常启动会直接加载游戏，此页面保留启动错误和本机日志。\n需通过 USB 放入完整 RomFS，启动时仍会校验全部资源。游戏支持安全暂停/恢复，但 iOS 仍可能回收进程；这不是自动存档。独立 GPU/SDK 诊断仍仅支持前台。完整游戏及所有系统中断场景尚未验证。";
     UIButton *core = [self button:@"1. 验证真实原生映像 / EOS / 计时门" action:@selector(runCore)];
     UIButton *gpu = [self button:@"2. 验证 72 份 MSL 与离屏 GPU 读回" action:@selector(runGPU)];
     UIButton *sdk = [self button:@"3. 执行真实 SDK 启动（可能退出）" action:@selector(runSDK)];
-    UIButton *game = [self button:@"4. 执行真实游戏入口（尚非试玩）" action:@selector(runGame)];
+    UIButton *game = [self button:@"4. 启动游戏" action:@selector(runGame)];
     self.runButtons = @[core, gpu, sdk, game];
     UIButton *refresh = [self button:@"刷新本机日志" action:@selector(refreshLog)];
     UIButton *export = [self button:@"导出诊断日志（请勿公开发布）" action:@selector(exportLog:)];
@@ -618,6 +690,7 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
     stack.spacing = 8;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     self.diagnosticStack=stack;
+    stack.hidden=requestedProbe==3;
     UIScrollView *scroll=[UIScrollView new];
     scroll.translatesAutoresizingMaskIntoConstraints=NO;
     [self.view addSubview:scroll];
@@ -721,12 +794,20 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
             return;
         }
         self.inputConfigured=YES;
-        self.joystick.enabled=YES;
+        self.joystick.enabled=NO;
         for (UIButton *button in self.inputButtons)
-            button.enabled=YES;
+            button.enabled=NO;
         [self.view setNeedsLayout];
     }
 #endif
+    if (mode==3 && [NSBundle.mainBundle.infoDictionary[@"HadesSafePauseResume"] boolValue]) {
+        if (hades_lifecycle_configure(lifecycle_transition,lifecycle_wake)) {
+            fprintf(stderr,"[Hades-iOS] Cannot configure safe game lifecycle; restart required\n");
+            [self showDiagnostics];
+            return;
+        }
+        self.lifecycleConfigured=YES;
+    }
     self.running = YES;
     self.activeMode=mode;
     for (UIButton *button in self.runButtons)
@@ -788,7 +869,15 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
         if (mode == 3) {
             romfs = [documents stringByAppendingPathComponent:@"RomFS"];
             fprintf(stderr, "[Hades-iOS] Checking full USB RomFS; no fallback to incomplete embedded resources\n");
-            if (!verify_romfs(romfs, [resources stringByAppendingPathComponent:@"RomFS-files.json"])) {
+            if (!verify_romfs(romfs, [resources stringByAppendingPathComponent:@"RomFS-files.json"],
+                             ^(NSUInteger verified,NSUInteger total) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    self.loadingProgress.progress=(float)verified/(float)total;
+                    self.loadingLabel.text=verified==total ? @"正在启动游戏…"
+                        : [NSString stringWithFormat:@"正在校验游戏资源\n%lu / %lu",
+                            (unsigned long)verified,(unsigned long)total];
+                });
+            })) {
                 fprintf(stderr, "[Hades-iOS] Game test rejected: missing/invalid Documents/RomFS; no game launch\n");
                 dispatch_async(dispatch_get_main_queue(), ^{ [self showDiagnostics]; });
                 return;
@@ -823,6 +912,45 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
 - (void)runGPU { [self runMode:1]; }
 - (void)runSDK { [self runMode:2]; }
 - (void)runGame { [self runMode:3]; }
+
+- (BOOL)pauseGame {
+    if (!self.running || self.activeMode!=3 || !self.lifecycleConfigured) return NO;
+    if (self.gamePaused) return YES;
+    [self releaseControls];
+    self.joystick.enabled=NO;
+    for (UIButton *button in self.inputButtons) button.enabled=NO;
+    if (hades_lifecycle_pause(1500000000)) {
+        fprintf(stderr,"[Hades-iOS] SAFE_PAUSE_FAILED; retaining exit protection, no save success claimed\n");
+        return NO;
+    }
+    self.gamePaused=YES;
+    self.fpsLabel.text=@"已暂停";
+    fflush(stdout);
+    fflush(stderr);
+    return YES;
+}
+
+- (void)resumeGame {
+    if (!self.gamePaused) return;
+    [self.view layoutIfNeeded];
+#ifdef HADES_VULKAN_HOST
+    CAMetalLayer *layer=(CAMetalLayer *)self.surface.layer;
+    layer.drawableSize=CGSizeMake(renderWidth,renderHeight);
+#endif
+    if (hades_lifecycle_resume(1500000000)) {
+        fprintf(stderr,"[Hades-iOS] SAFE_RESUME_FAILED; guest remains parked, terminating safely\n");
+        fflush(stderr);
+        _Exit(75);
+    }
+    self.gamePaused=NO;
+    self.fpsCounter=(hades_fps_counter){0};
+    self.cpuCounter=(hades_cpu_counter){0};
+    self.monitorSampleTime=0;
+    BOOL ready=self.loadingView.hidden;
+    self.joystick.enabled=ready;
+    for (UIButton *button in self.inputButtons) button.enabled=ready;
+    fprintf(stderr,"[Hades-iOS] SAFE_RESUME_COMPLETE; existing game state retained, not a reload\n");
+}
 @end
 
 @interface HadesSceneDelegate : UIResponder <UIWindowSceneDelegate>
@@ -842,19 +970,31 @@ static BOOL verify_romfs(NSString *directory, NSString *catalog) {
     (void)scene;
     HadesViewController *controller=(HadesViewController *)self.window.rootViewController;
     [controller releaseControls];
+    if ([controller pauseGame]) return;
+    if (controller.lifecycleConfigured && controller.running && controller.activeMode==3) {
+        fflush(stderr);
+        _Exit(75);
+    }
     if (controller.running && controller.activeMode>=2 && hades_ipc_set_focus_state(2))
         fprintf(stderr,"[Hades-iOS] Inactive foreground focus not delivered; IPC not ready or policy rejected\n");
 }
 - (void)sceneDidBecomeActive:(UIScene *)scene {
     (void)scene;
     HadesViewController *controller=(HadesViewController *)self.window.rootViewController;
-    [controller runRequestedProbe];
-    if (controller.running && controller.activeMode>=2 && hades_ipc_set_focus_state(1))
+    [controller resumeGame];
+    /* UIKit can still report inactive until this scene callback returns. */
+    dispatch_async(dispatch_get_main_queue(), ^{ [controller runRequestedProbe]; });
+    if (!controller.lifecycleConfigured && controller.running && controller.activeMode>=2 && hades_ipc_set_focus_state(1))
         fprintf(stderr,"[Hades-iOS] Active foreground focus not delivered; IPC not ready or policy rejected\n");
 }
 - (void)sceneDidEnterBackground:(UIScene *)scene {
     (void)scene;
     HadesViewController *controller=(HadesViewController *)self.window.rootViewController;
+    if (controller.gamePaused && hades_lifecycle_status()==HADES_LIFECYCLE_PAUSED) {
+        fprintf(stderr,"[Hades-iOS] SAFE_BACKGROUND_PAUSED; no guest/driver execution; iOS may still reclaim this process\n");
+        fflush(stderr);
+        return;
+    }
     if (hades_ios_background_requires_exit(controller.running,controller.activeMode)) {
         fprintf(stderr,"[Hades-iOS] FOREGROUND_ONLY_ABORT mode=%u: required guest-thread/GPU suspension unimplemented; no background execution, pause or save success claimed\n",controller.activeMode);
         fflush(stdout);
@@ -898,6 +1038,16 @@ int main(int argc, char **argv) {
                 model, UIDevice.currentDevice.systemVersion.UTF8String,
                 (unsigned long long)os_proc_available_memory());
         hades_log_memory("app-launch",0,0,0);
+        id safeLifecycle=NSBundle.mainBundle.infoDictionary[@"HadesSafePauseResume"];
+        if (safeLifecycle!=(__bridge id)kCFBooleanTrue && safeLifecycle!=(__bridge id)kCFBooleanFalse) {
+            fprintf(stderr,"[Hades-iOS] Missing or invalid explicit safe lifecycle setting; no launch\n");
+            return 2;
+        }
+        id autoStart=NSBundle.mainBundle.infoDictionary[@"HadesAutoStartGame"];
+        if (autoStart!=(__bridge id)kCFBooleanTrue && autoStart!=(__bridge id)kCFBooleanFalse) {
+            fprintf(stderr,"[Hades-iOS] Missing or invalid explicit game startup setting; no launch\n");
+            return 2;
+        }
         id directoryProbe=NSBundle.mainBundle.infoDictionary[@"HadesDirectoryOrderProbe"];
         if (directoryProbe!=(__bridge id)kCFBooleanTrue && directoryProbe!=(__bridge id)kCFBooleanFalse) {
             fprintf(stderr,"[Hades-iOS] Missing or invalid explicit directory order probe setting; no launch\n");
@@ -963,9 +1113,10 @@ int main(int argc, char **argv) {
         }
 #endif
         if (hades_ios_requested_probe(argc,argv,&requestedProbe)) {
-            fprintf(stderr,"[Hades-iOS] Invalid explicit probe: use --hades-probe core or gpu once; no launch\n");
+            fprintf(stderr,"[Hades-iOS] Invalid diagnostic request: use --hades-diagnostics or --hades-probe core/gpu once; no launch\n");
             return 2;
         }
+        requestedProbe=hades_ios_initial_mode([autoStart boolValue],requestedProbe);
         return UIApplicationMain(argc, argv, nil, NSStringFromClass(HadesAppDelegate.class));
     }
 }

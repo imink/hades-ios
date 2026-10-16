@@ -1,6 +1,7 @@
 #define _DARWIN_C_SOURCE
 #include "callout.h"
 #include "memory.h"
+#include "lifecycle.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -87,7 +88,15 @@ void hades_gate_stack_leave(void) {
     stacks *value=state();
     if (!value->host_depth)
         fatal("Host gate stack leave without active entry");
+    hades_lifecycle_host_leave();
     value->host_depth--;
+}
+
+void hades_gate_stack_abandon(void) {
+    stacks *value=state();
+    if (value->host_depth!=1 || value->callback_depth)
+        fatal("ExitThread outside an outermost host gate");
+    value->host_depth=0;
 }
 
 uint64_t hades_callout_run(uintptr_t function, const uint64_t arguments[6]) {

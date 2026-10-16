@@ -7,11 +7,9 @@ from pathlib import Path
 import plistlib
 import re
 import shutil
-import struct
 import subprocess
 import sys
 import zipfile
-import zlib
 
 from inspect_target import FormatError
 from link_modules import generate_artifacts
@@ -19,20 +17,24 @@ from prepare import REPO, outside_git, sha256, verified_modules, write_json
 from verify_embed import verify_object
 
 
-def info_plist(identifier, render_resolution="720p"):
+def info_plist(identifier, render_resolution="720p", *, gpu_capture_probe=False):
     if not re.fullmatch(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", identifier):
         raise FormatError("Invalid iOS bundle identifier")
+    if type(gpu_capture_probe) is not bool:
+        raise FormatError("GPU capture probe must be an explicit boolean")
     return {
         "CFBundleIdentifier": identifier, "CFBundleExecutable": "HadesPortTest",
-        "CFBundleName": "HadesPortTest", "CFBundleDisplayName": "Hades Port Test",
-        "CFBundlePackageType": "APPL", "CFBundleVersion": "31",
+        "CFBundleName": "Hades", "CFBundleDisplayName": "Hades",
+        "CFBundlePackageType": "APPL", "CFBundleVersion": "37",
+        "HadesSafePauseResume": True,
+        "HadesAutoStartGame": True,
         "HadesRenderResolution": render_resolution,
         "HadesDirectoryOrderProbe": True,
         "HadesVulkanBindingMode": "argument-buffers",
         "HadesVulkanQueueCompletionProbe": False,
-        "HadesVulkanPixelCaptureProbe": True,
+        "HadesVulkanPixelCaptureProbe": gpu_capture_probe,
         "HadesVulkanAttachmentLoadProbe": False,
-        "HadesVulkanPassCaptureProbe": True,
+        "HadesVulkanPassCaptureProbe": gpu_capture_probe,
         "CFBundleInfoDictionaryVersion": "6.0",
         "CFBundleShortVersionString": "0.1", "CFBundleDevelopmentRegion": "en",
         "MinimumOSVersion": "26.0", "LSRequiresIPhoneOS": True, "UIDeviceFamily": [1, 2],
@@ -50,28 +52,46 @@ def info_plist(identifier, render_resolution="720p"):
     }
 
 
-def icon_png(size):
-    rows = []
-    for y in range(size):
-        row = bytearray()
-        for x in range(size):
-            h = (size//4 <= x < size//3 or 2*size//3 <= x < 3*size//4) and size//4 <= y < 3*size//4
-            h |= size//4 <= x < 3*size//4 and 9*size//20 <= y < 11*size//20
-            row.extend((232, 238, 245, 255) if h else (24, 46, 70, 255))
-        rows.append(b"\0" + row)
-
-    def chunk(name, payload):
-        return struct.pack(">I", len(payload)) + name + payload + struct.pack(">I", zlib.crc32(name + payload))
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
-            + chunk(b"IDAT", zlib.compress(b"".join(rows))) + chunk(b"IEND", b""))
-
-
 def command(arguments, log):
     result = subprocess.run(list(map(str, arguments)), capture_output=True, text=True, timeout=300)
     log.write_text(result.stdout + result.stderr)
     if result.returncode:
         raise FormatError(f"iOS build command failed; inspect {log}")
     return result.stdout.strip()
+
+
+def create_app_icons(source, assets):
+    if not source.is_file() or source.is_symlink():
+        raise FormatError("Missing regular local Hades control icon")
+    digest = sha256(source)
+    assets.mkdir(parents=True)
+    properties = command(["sips", "--getProperty", "format", "--getProperty", "pixelWidth",
+                          "--getProperty", "pixelHeight", "--getProperty", "hasAlpha", source],
+                         assets.parent / "source-icon.log")
+    values = dict(re.findall(r"^\s+(format|pixelWidth|pixelHeight|hasAlpha): (\S+)$",
+                             properties, re.MULTILINE))
+    if (values.get("format") != "jpeg" or values.get("hasAlpha") != "no"
+            or values.get("pixelWidth") != "256" or values.get("pixelHeight") != "256"):
+        raise FormatError("Hades control icon must be an opaque 256x256 JPEG")
+    icons, hashes = [], {}
+    for idiom, points, scales in (("iphone", 20, (2, 3)), ("iphone", 29, (2, 3)),
+                                  ("iphone", 40, (2, 3)), ("iphone", 60, (2, 3)),
+                                  ("ipad", 20, (1, 2)), ("ipad", 29, (1, 2)),
+                                  ("ipad", 40, (1, 2)), ("ipad", 76, (1, 2)),
+                                  ("ipad", 83.5, (2,)), ("ios-marketing", 1024, (1,))):
+        for scale in scales:
+            name = f"icon-{idiom}-{points}-{scale}.png"
+            size = int(points * scale)
+            command(["sips", "--setProperty", "format", "png", "--resampleHeightWidth",
+                     size, size, source, "--out", assets / name], assets.parent / (name + ".log"))
+            hashes[name] = sha256(assets / name)
+            icons.append({"idiom": idiom, "size": f"{points}x{points}", "scale": f"{scale}x", "filename": name})
+    write_json(assets / "Contents.json", {"images": icons, "info": {"version": 1, "author": "hades-local-build"}})
+    if sha256(source) != digest:
+        raise FormatError("Hades control icon changed during conversion")
+    return {"source_file": "data/control/icon_AmericanEnglish.dat",
+            "source_sha256": digest, "source_dimensions": [256, 256],
+            "assets_sha256": hashes}
 
 
 def copy_resources(source, destination):
@@ -202,14 +222,18 @@ def verify_catalog(root, bindings):
     return hashlib.sha256(contents).hexdigest()
 
 
-def build_receipt(sources, bindings, images, vulkan):
+def build_receipt(sources, bindings, images, vulkan, launch_configuration=None):
     inputs = {"sources": sources, "bindings": bindings, "images": images,
+              "launch_configuration": launch_configuration,
               "vulkan": {key: vulkan[key] for key in
                          ("platform", "version", "archive_sha256", "members_sha256")} if vulkan else None}
     return hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def build(root, output, bindings, reuse_romfs_archive=None, moltenvk=None, render_resolution="720p"):
+def build(root, output, bindings, reuse_romfs_archive=None, moltenvk=None, render_resolution="720p",
+          *, gpu_capture_probe=False):
+    if gpu_capture_probe and not moltenvk:
+        raise FormatError("GPU capture probe requires the Vulkan profile")
     root, output = outside_git(root), outside_git(output)
     bindings = outside_git(bindings)
     if output.exists():
@@ -237,21 +261,14 @@ def build(root, output, bindings, reuse_romfs_archive=None, moltenvk=None, rende
     app.mkdir(parents=True)
     app.chmod(0o700)
     identifier = "local.hades.porttest"
-    (app / "Info.plist").write_bytes(plistlib.dumps(info_plist(identifier, render_resolution)))
-    (app / "PkgInfo").write_bytes(b"APPL????")
+    launch_configuration = info_plist(identifier, render_resolution, gpu_capture_probe=gpu_capture_probe)
+    launch_configuration["HadesAutoStartGame"] = moltenvk is not None
+    icon_source = root / "data/control/icon_AmericanEnglish.dat"
     assets = output / "icons/Assets.xcassets/AppIcon.appiconset"
-    assets.mkdir(parents=True)
-    icons = []
-    for idiom, points, scales in (("iphone", 20, (2, 3)), ("iphone", 29, (2, 3)),
-                                  ("iphone", 40, (2, 3)), ("iphone", 60, (2, 3)),
-                                  ("ipad", 20, (1, 2)), ("ipad", 29, (1, 2)),
-                                  ("ipad", 40, (1, 2)), ("ipad", 76, (1, 2)),
-                                  ("ipad", 83.5, (2,)), ("ios-marketing", 1024, (1,))):
-        for scale in scales:
-            name = f"icon-{idiom}-{points}-{scale}.png"
-            (assets / name).write_bytes(icon_png(int(points * scale)))
-            icons.append({"idiom": idiom, "size": f"{points}x{points}", "scale": f"{scale}x", "filename": name})
-    write_json(assets / "Contents.json", {"images": icons, "info": {"version": 1, "author": "hades-local-build"}})
+    app_icon = create_app_icons(icon_source, assets)
+    launch_configuration["HadesAppIconSHA256"] = app_icon["source_sha256"]
+    (app / "Info.plist").write_bytes(plistlib.dumps(launch_configuration))
+    (app / "PkgInfo").write_bytes(b"APPL????")
     command(["xcrun", "actool", output / "icons/Assets.xcassets", "--compile", app,
              "--platform", "iphoneos", "--minimum-deployment-target", "17.0",
              "--target-device", "iphone", "--target-device", "ipad", "--app-icon", "AppIcon",
@@ -265,14 +282,14 @@ def build(root, output, bindings, reuse_romfs_archive=None, moltenvk=None, rende
                      "DTSDKName": "iphoneos" + sdk_version})
     (app / "Info.plist").write_bytes(plistlib.dumps(metadata))
     sources = [REPO / name for name in ("hades/ios/main.m", "hades/runtime/core.c",
-               "hades/runtime/callout.c", "hades/runtime/audio.c",
+               "hades/runtime/callout.c", "hades/runtime/lifecycle.c", "hades/runtime/audio.c",
                "hades/runtime/memory.c", "hades/runtime/ipc.c", "hades/runtime/threads.c",
                "hades/runtime/host.c", "hades/runtime/save.c", "hades/runtime/host_entry.S",
                "hades/runtime/probe.c", "hades/runtime/render_probe.m", "dm/host/entry.S",
                "dm/gfx/nvn/nvn_spirv_bind.c")]
     hashed = sources + [REPO / name for name in (
         "hades/runtime/core.h", "hades/runtime/callout.h", "hades/runtime/audio.h", "hades/runtime/memory.h", "hades/runtime/ipc.h",
-        "hades/runtime/trace.h",
+        "hades/runtime/trace.h", "hades/runtime/lifecycle.h",
         "hades/runtime/diagnostics.h",
         "hades/ios/policy.h", "hades/ios/joystick.h", "hades/ios/fps.h",
         "hades/ios/monitor.h", "hades/ios/controls.h", "hades/ios/action_button.h",
@@ -289,7 +306,7 @@ def build(root, output, bindings, reuse_romfs_archive=None, moltenvk=None, rende
     hashes = {str(path.relative_to(REPO)): sha256(path) for path in hashed}
     image_hashes = {name: sha256(images / (name + ".patched.bin"))
                     for name in ("main", "subsdk0", "subsdk1", "sdk", "eos")}
-    build_identity = build_receipt(hashes, catalog_digest, image_hashes, vulkan_receipt)
+    build_identity = build_receipt(hashes, catalog_digest, image_hashes, vulkan_receipt, launch_configuration)
     metadata["HadesBuildReceipt"] = build_identity
     (app / "Info.plist").write_bytes(plistlib.dumps(metadata))
     executable = app / "HadesPortTest"
@@ -339,9 +356,13 @@ def build(root, output, bindings, reuse_romfs_archive=None, moltenvk=None, rende
     entries = archive_bundle(app, ipa)
     if any(sha256(path) != hashes[str(path.relative_to(REPO))] for path in hashed):
         raise FormatError("iOS package sources changed during build")
+    if sha256(icon_source) != app_icon["source_sha256"]:
+        raise FormatError("Hades control icon changed during packaging")
     report = {
         "status": "iphoneos-aot-diagnostic-ipa-requires-apple-resigning-not-playable",
         "build_receipt": build_identity,
+        "launch_configuration": launch_configuration,
+        "app_icon": app_icon,
         "ipa": ipa.name, "ipa_sha256": sha256(ipa), "ipa_bytes": ipa.stat().st_size,
         "bundle_identifier": identifier, "minimum_ios": "26.0", "architectures": ["arm64"],
         "target_device": "iPhone 15 Pro Max / A17 Pro / iPhone16,2; not yet device-verified",
@@ -366,9 +387,9 @@ def build(root, output, bindings, reuse_romfs_archive=None, moltenvk=None, rende
         "limitations": ["Host-symbol macOS probe enters nnMain; Vulkan profile reads actual assets and atomically commits local save data",
                         "Required filesystem, RO transport, gameplay graphics correctness and device input behavior incompletely verified",
                         "Core/TSD/signed-page remap and GPU must be verified on a physical device",
-                        "Actual guest-thread/GPU suspension remains unimplemented; active GPU/SDK/game background aborts the diagnostic process with status 75",
-                        "UIKit inactive/active foreground focus publishes actual states 2/1; unsupported suspension policies are explicitly rejected",
-                        "Foreground-only termination is not pause/resume or a guaranteed save; uncommitted progress may be lost",
+                        "Game mode cooperatively parks guest/outer host calls, drains GPU and pauses audio; device suspend/resume remains unverified for this build",
+                        "Safe lifecycle transitions freeze guest time; a failed 1.5-second transition retains exit-75 protection; GPU/SDK-only diagnostic modes remain foreground-only",
+                        "Suspension is not forced saving or protection against iOS memory-pressure termination; uncommitted progress may be lost",
                         "Self-task resident/peak/physical-footprint/virtual and Metal allocation metrics are separate overlapping accounts, not gameplay or device-memory-limit proof",
                         "Re-sign with a local Apple provisioning profile; requested memory entitlements may require a paid team",
                         "IPA and separate RomFS archive include private game assets; do not upload or share publicly",
@@ -400,9 +421,12 @@ def main():
                         help="Experimental profiles adjust build-identified guest window constants")
     parser.add_argument("--reuse-romfs-archive", type=Path,
                         help="Reverify and reference an existing private local archive without recompressing/copying it")
+    parser.add_argument("--gpu-capture-probe", action="store_true",
+                        help="Opt in to intrusive GPU pixel/pass readback; changes timing and can terminate at diagnostic limits")
     args = parser.parse_args()
     try:
-        build(args.work, args.out, args.bindings, args.reuse_romfs_archive, args.moltenvk, args.render_resolution)
+        build(args.work, args.out, args.bindings, args.reuse_romfs_archive, args.moltenvk, args.render_resolution,
+              gpu_capture_probe=args.gpu_capture_probe)
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         print(f"Hades iOS packaging failed: {error}", file=sys.stderr)
         return 2

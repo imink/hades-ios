@@ -6,6 +6,7 @@
 #include <vulkan/vulkan.h>
 #include <MoltenVK/mvk_deprecated_api.h>
 #include "vulkan.h"
+#include "lifecycle.h"
 #include "host.h"
 #include "memory.h"
 #include "ipc.h"
@@ -26,6 +27,7 @@ static int graphics_ready, vi_ready;
 static int queue_completion_probe;
 static unsigned char display_token, layer_token, window_token;
 static pthread_mutex_t resource_lock = PTHREAD_MUTEX_INITIALIZER;
+static VkDevice lifecycle_devices[16];
 static struct { VkDeviceMemory memory; VkDevice device; VkDeviceSize size;
                 const VkAllocationCallbacks *allocator; int mapped; } allocations[1024];
 static _Atomic unsigned long presents;
@@ -997,6 +999,34 @@ static int create_device(uint64_t *r) {
     info.enabledExtensionCount=count;
     info.ppEnabledExtensionNames=extensions;
     r[0]=(uint32_t)vkCreateDevice((VkPhysicalDevice)(uintptr_t)r[0],&info,allocator,(VkDevice *)(uintptr_t)r[3]);
+    if (r[0]==VK_SUCCESS) {
+        pthread_mutex_lock(&resource_lock);
+        unsigned slot;
+        for (slot=0;slot<16 && lifecycle_devices[slot];slot++);
+        if (slot<16) lifecycle_devices[slot]=*(VkDevice *)(uintptr_t)r[3];
+        pthread_mutex_unlock(&resource_lock);
+        if (slot==16) return vk_error("Lifecycle device registry exhausted");
+    }
+    return 0;
+}
+
+int hades_vulkan_drain_lifecycle(void) {
+    if (!hades_lifecycle_quiescent())
+        return vk_error("GPU drain requires all guest execution and outer host calls to stop");
+    VkDevice devices[16];
+    pthread_mutex_lock(&resource_lock);
+    memcpy(devices,lifecycle_devices,sizeof devices);
+    pthread_mutex_unlock(&resource_lock);
+    for (unsigned i=0;i<16;i++)
+        if (devices[i]) {
+            VkResult result=vkDeviceWaitIdle(devices[i]);
+            if (result!=VK_SUCCESS) {
+                fprintf(stderr,"[hades-vulkan] Lifecycle vkDeviceWaitIdle failed: %d\n",result);
+                return -1;
+            }
+        }
+    fprintf(stderr,"[hades-vulkan] LIFECYCLE_GPU_IDLE presents=%llu\n",
+            (unsigned long long)hades_vulkan_present_count());
     return 0;
 }
 
@@ -1673,6 +1703,14 @@ int hades_vulkan_call(unsigned index, const char *name, uint64_t *r) {
             r[1]=(uintptr_t)&load_info;
         }
         int status=invoke(index,function,r);
+        if (!status && index==HADES_HOST_VULKAN_DESTROY_DEVICE) {
+            pthread_mutex_lock(&resource_lock);
+            unsigned slot;
+            for (slot=0;slot<16 && lifecycle_devices[slot]!=(VkDevice)(uintptr_t)input[0];slot++);
+            if (slot<16) lifecycle_devices[slot]=VK_NULL_HANDLE;
+            pthread_mutex_unlock(&resource_lock);
+            if (slot==16) return vk_error("Destroyed device missing from lifecycle registry");
+        }
         if (adapted_pass_image || (attachment_load_probe && index==HADES_HOST_VULKAN_CREATE_RENDER_PASS))
             r[1]=input[1];
         free(load_attachments);

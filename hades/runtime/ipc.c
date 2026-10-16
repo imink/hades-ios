@@ -1,5 +1,6 @@
 #define _DARWIN_C_SOURCE
 #include "ipc.h"
+#include "lifecycle.h"
 #include "memory.h"
 #include "audio.h"
 #include "trace.h"
@@ -231,6 +232,21 @@ int hades_ipc_set_focus_state(unsigned state) {
     return 0;
 }
 
+void hades_ipc_wake_lifecycle(void) { pthread_cond_broadcast(&event_changed); }
+
+int hades_ipc_lifecycle_transition(int value) {
+    if (!hades_lifecycle_quiescent())
+        return error("Actual lifecycle transition requires quiescent guest and host execution");
+    pthread_mutex_lock(&lock);
+    int ready=process_id!=0;
+    pthread_mutex_unlock(&lock);
+    if (!ready) {
+        fprintf(stderr,"[hades-ipc] Lifecycle transition before SDK IPC initialization; no live audio\n");
+        return 0;
+    }
+    return hades_ipc_set_suspended(value);
+}
+
 int hades_ipc_set_suspended(int value) {
     if (value != 0 && value != 1)
         return error("Invalid lifecycle transition");
@@ -239,7 +255,7 @@ int hades_ipc_set_suspended(int value) {
         pthread_mutex_unlock(&lock);
         return error("Lifecycle transition without kernel IPC process");
     }
-    if (value && (focus_handling[2] || out_of_focus_suspending)) {
+    if (value && (focus_handling[2] || out_of_focus_suspending) && !hades_lifecycle_quiescent()) {
         pthread_mutex_unlock(&lock);
         return error("Selected focus policy requires guest-thread suspension, which is not yet integrated");
     }
@@ -1104,12 +1120,7 @@ int hades_ipc_svc(unsigned svc, uint64_t *registers, void *message, size_t capac
         }
         uint64_t deadline = 0;
         if (timeout > 0) {
-            struct timespec now;
-            if (clock_gettime(CLOCK_MONOTONIC, &now)) {
-                pthread_mutex_unlock(&lock);
-                return error("Cannot construct event wait deadline");
-            }
-            uint64_t ns = (uint64_t)now.tv_sec * 1000000000 + (uint64_t)now.tv_nsec;
+            uint64_t ns = hades_lifecycle_clock_ns();
             if ((uint64_t)timeout > UINT64_MAX - ns) {
                 pthread_mutex_unlock(&lock);
                 return error("Event wait deadline overflows monotonic clock");
@@ -1149,12 +1160,7 @@ int hades_ipc_svc(unsigned svc, uint64_t *registers, void *message, size_t capac
             for (unsigned i=0;i<count;i++)
                 audio_wait|=find(handles[i])->kind==AUDOUT_EVENT;
             if (timeout > 0) {
-                struct timespec now;
-                if (clock_gettime(CLOCK_MONOTONIC, &now)) {
-                    pthread_mutex_unlock(&lock);
-                    return error("Cannot read event wait clock");
-                }
-                uint64_t ns = (uint64_t)now.tv_sec * 1000000000 + (uint64_t)now.tv_nsec;
+                uint64_t ns = hades_lifecycle_clock_ns();
                 if (ns >= deadline) {
                     timeout = 0;
                     continue;
@@ -1167,8 +1173,7 @@ int hades_ipc_svc(unsigned svc, uint64_t *registers, void *message, size_t capac
             if (audio_wait && (timeout<0 || relative.tv_sec || relative.tv_nsec>10000000))
                 relative=(struct timespec){.tv_nsec=10000000};
             event_waiters++;
-            int status = timeout < 0 && !audio_wait ? pthread_cond_wait(&event_changed, &lock)
-                : pthread_cond_timedwait_relative_np(&event_changed, &lock, &relative);
+            int status=hades_lifecycle_wait(&event_changed,&lock,timeout < 0 && !audio_wait ? NULL : &relative);
             event_waiters--;
             if (status == ETIMEDOUT && !audio_wait)
                 timeout = 0;

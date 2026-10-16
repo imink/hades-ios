@@ -4,11 +4,35 @@
 #include "../runtime/host.h"
 #include "../runtime/memory.h"
 #include "../runtime/callout.h"
+#include "../runtime/lifecycle.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdatomic.h>
+#include <unistd.h>
+
+static atomic_int lifecycle_ready,lifecycle_stop;
+static atomic_uint lifecycle_steps;
+static pthread_t lifecycle_worker_thread;
+static void lifecycle_wake(void) {}
+static int lifecycle_transition(int suspended) {
+    assert(pthread_equal(pthread_self(),lifecycle_worker_thread));
+    return suspended ? hades_vulkan_drain_lifecycle() : 0;
+}
+static void *lifecycle_worker(void *unused) {
+    (void)unused;
+    lifecycle_worker_thread=pthread_self();
+    hades_lifecycle_thread_enter();
+    atomic_store(&lifecycle_ready,1);
+    while (!atomic_load(&lifecycle_stop)) {
+        hades_lifecycle_host_enter();
+        atomic_fetch_add(&lifecycle_steps,1);
+        hades_lifecycle_host_leave();
+    }
+    hades_lifecycle_thread_leave();
+    return NULL;
+}
 
 static _Alignas(16384) unsigned char pool[16384];
 static _Alignas(16384) uint32_t observation_code[4096];
@@ -541,6 +565,21 @@ int main(int argc,char **argv) {
     assert(C(VULKAN_END_COMMAND_BUFFER,U(command))==VK_SUCCESS);
     VkSubmitInfo submit={.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO,.commandBufferCount=1,.pCommandBuffers=&command};
     assert(C(VULKAN_QUEUE_SUBMIT,U(queue),1,U(&submit),0)==VK_SUCCESS);
+    assert(!hades_lifecycle_configure(lifecycle_transition,lifecycle_wake));
+    pthread_t lifecycle_thread;
+    assert(!pthread_create(&lifecycle_thread,NULL,lifecycle_worker,NULL));
+    while (!atomic_load(&lifecycle_ready)) usleep(100);
+    for (unsigned i=0;i<2;i++) {
+        assert(!hades_lifecycle_pause(1000000000));
+        assert(!memcmp(mapped[0],mapped[1],1024));
+        unsigned before=atomic_load(&lifecycle_steps);
+        usleep(1000);
+        assert(atomic_load(&lifecycle_steps)==before);
+        assert(!hades_lifecycle_resume(1000000000));
+    }
+    atomic_store(&lifecycle_stop,1);
+    assert(!pthread_join(lifecycle_thread,NULL));
+    puts("VULKAN_LIFECYCLE_GPU_IDLE_OK: real submitted buffer copy completed before pause acknowledgment");
     assert(C(VULKAN_QUEUE_IDLE,U(queue))==VK_SUCCESS);
     assert(!memcmp(mapped[0],mapped[1],1024));
     texture_sample_probe(device,queue,family,&memory,buffers[0],mapped[0]);

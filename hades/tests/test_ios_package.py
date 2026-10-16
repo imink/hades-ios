@@ -1,7 +1,11 @@
 from pathlib import Path
+from contextlib import redirect_stdout
+import io
 import plistlib
 import json
+import hashlib
 import struct
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -13,7 +17,8 @@ import zlib
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from inspect_target import FormatError
 import link_modules
-from package_ios import archive_bundle, archive_romfs, build_receipt, copy_resources, icon_png, info_plist, verify_catalog, verify_romfs_archive
+import package_ios
+from package_ios import archive_bundle, archive_romfs, build_receipt, copy_resources, create_app_icons, info_plist, verify_catalog, verify_romfs_archive
 from verify_embed import verify_object
 
 
@@ -80,16 +85,21 @@ class IOSPackageTests(unittest.TestCase):
         self.assertEqual(metadata["CFBundleExecutable"], "HadesPortTest")
         self.assertEqual(metadata["CFBundleSupportedPlatforms"], ["iPhoneOS"])
         self.assertEqual(metadata["MinimumOSVersion"], "26.0")
-        self.assertEqual(metadata["CFBundleVersion"], "31")
+        self.assertEqual(metadata["CFBundleVersion"], "37")
+        self.assertEqual(metadata["CFBundleName"], "Hades")
+        self.assertEqual(metadata["CFBundleDisplayName"], "Hades")
+        self.assertEqual(metadata["CFBundleIdentifier"], "local.hades.porttest")
+        self.assertIs(metadata["HadesSafePauseResume"], True)
+        self.assertIs(metadata["HadesAutoStartGame"], True)
         self.assertEqual(metadata["HadesRenderResolution"], "720p")
         self.assertEqual(info_plist("local.hades.porttest", "1080p")["HadesRenderResolution"], "1080p")
         self.assertEqual(info_plist("local.hades.porttest", "wide-720p")["HadesRenderResolution"], "wide-720p")
         self.assertIs(metadata["HadesDirectoryOrderProbe"], True)
         self.assertIs(metadata["HadesVulkanAttachmentLoadProbe"], False)
-        self.assertIs(metadata["HadesVulkanPassCaptureProbe"], True)
+        self.assertIs(metadata["HadesVulkanPassCaptureProbe"], False)
         self.assertEqual(metadata["HadesVulkanBindingMode"], "argument-buffers")
         self.assertFalse(metadata["HadesVulkanQueueCompletionProbe"])
-        self.assertTrue(metadata["HadesVulkanPixelCaptureProbe"])
+        self.assertFalse(metadata["HadesVulkanPixelCaptureProbe"])
         self.assertTrue(metadata["UIRequiresFullScreen"])
         self.assertNotIn("BAAppGroupID", metadata)
         scenes = metadata["UIApplicationSceneManifest"]["UISceneConfigurations"]
@@ -100,21 +110,92 @@ class IOSPackageTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(FormatError):
                 info_plist(name)
 
-    def test_generated_icon_is_a_complete_png(self):
-        data = icon_png(32)
-        self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
-        offset, compressed = 8, b""
-        while offset < len(data):
-            size = struct.unpack_from(">I", data, offset)[0]
-            kind = data[offset + 4:offset + 8]
-            body = data[offset + 8:offset + 8 + size]
-            crc = struct.unpack_from(">I", data, offset + 8 + size)[0]
-            self.assertEqual(zlib.crc32(kind + body), crc)
-            if kind == b"IDAT":
-                compressed += body
-            offset += size + 12
-        self.assertEqual(offset, len(data))
-        self.assertEqual(len(zlib.decompress(compressed)), 32 * (1 + 32*4))
+    def test_gpu_readback_requires_explicit_opt_in_for_every_render_profile(self):
+        for profile in ("720p", "1080p", "wide-720p"):
+            with self.subTest(profile=profile):
+                normal = info_plist("local.hades.porttest", profile)
+                for key in ("HadesVulkanPixelCaptureProbe", "HadesVulkanPassCaptureProbe"):
+                    self.assertIs(normal[key], False)
+                capture = info_plist("local.hades.porttest", profile, gpu_capture_probe=True)
+                self.assertEqual({key for key in normal if normal[key] != capture[key]},
+                                 {"HadesVulkanPixelCaptureProbe", "HadesVulkanPassCaptureProbe"})
+                for key in ("HadesVulkanPixelCaptureProbe", "HadesVulkanPassCaptureProbe"):
+                    self.assertIs(capture[key], True)
+                self.assertIs(normal["HadesDirectoryOrderProbe"], True)
+                self.assertEqual(normal["HadesVulkanBindingMode"], "argument-buffers")
+                self.assertEqual(plistlib.loads(plistlib.dumps(capture)), capture)
+        for invalid in (None, 1, "true"):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(FormatError, "explicit boolean"):
+                info_plist("local.hades.porttest", gpu_capture_probe=invalid)
+
+    def test_build_receipt_distinguishes_launch_configuration(self):
+        normal = info_plist("local.hades.porttest", "wide-720p")
+        capture = info_plist("local.hades.porttest", "wide-720p", gpu_capture_probe=True)
+        first = build_receipt({"source": "s"}, "bindings", {"image": "i"}, None, normal)
+        self.assertEqual(first, build_receipt({"source": "s"}, "bindings", {"image": "i"},
+                                             None, dict(reversed(list(normal.items())))))
+        diagnostics = dict(normal, HadesAutoStartGame=False)
+        branded = dict(normal, HadesAppIconSHA256="synthetic-icon-hash")
+        renamed = dict(normal, CFBundleDisplayName="Other")
+        for metadata in (capture, info_plist("local.hades.porttest", "720p"), diagnostics, branded, renamed):
+            with self.subTest(metadata=metadata):
+                self.assertNotEqual(first, build_receipt({"source": "s"}, "bindings", {"image": "i"},
+                                                         None, metadata))
+
+    def test_cli_defaults_to_no_gpu_capture_and_forwards_explicit_opt_in(self):
+        arguments = ["package_ios.py", "--work", "private-work", "--out", "private-out",
+                     "--bindings", "private-bindings", "--moltenvk", "private-framework"]
+        for flags, enabled in (([], False), (["--gpu-capture-probe"], True)):
+            with self.subTest(enabled=enabled), patch.object(sys, "argv", arguments + flags), \
+                    patch.object(package_ios, "build") as builder, redirect_stdout(io.StringIO()):
+                self.assertEqual(package_ios.main(), 0)
+                self.assertIs(builder.call_args.kwargs["gpu_capture_probe"], enabled)
+
+    def test_gpu_capture_rejects_non_vulkan_build_before_creating_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "package"
+            with self.assertRaisesRegex(FormatError, "requires the Vulkan profile"):
+                package_ios.build(Path(temporary), output, Path(temporary) / "bindings",
+                                  gpu_capture_probe=True)
+            self.assertFalse(output.exists())
+
+    def test_local_control_icon_generates_all_sizes_without_modifying_source(self):
+        def chunk(kind, body):
+            return (struct.pack(">I", len(body)) + kind + body
+                    + struct.pack(">I", zlib.crc32(kind + body)))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = root / "synthetic.png"
+            fixture.write_bytes(b"\x89PNG\r\n\x1a\n"
+                                + chunk(b"IHDR", struct.pack(">IIBBBBB", 256, 256, 8, 2, 0, 0, 0))
+                                + chunk(b"IDAT", zlib.compress((b"\0" + b"\x24\x56\x78" * 256) * 256))
+                                + chunk(b"IEND", b""))
+            source = root / "icon_AmericanEnglish.dat"
+            subprocess.run(["sips", "-s", "format", "jpeg", str(fixture), "--out", str(source)],
+                           check=True, capture_output=True)
+            original = source.read_bytes()
+            assets = root / "icons/AppIcon.appiconset"
+            report = create_app_icons(source, assets)
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(report["source_sha256"], hashlib.sha256(original).hexdigest())
+            images = json.loads((assets / "Contents.json").read_text())["images"]
+            self.assertEqual(len(images), 18)
+            self.assertEqual(set(report["assets_sha256"]), {image["filename"] for image in images})
+            for image in images:
+                data = (assets / image["filename"]).read_bytes()
+                self.assertEqual(hashlib.sha256(data).hexdigest(), report["assets_sha256"][image["filename"]])
+                self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
+                size = int(float(image["size"].split("x")[0]) * int(image["scale"][:-1]))
+                self.assertEqual(struct.unpack_from(">II", data, 16), (size, size))
+                self.assertEqual(data[25], 2)  # Opaque RGB, not RGBA.
+            with self.assertRaisesRegex(FormatError, "opaque 256x256 JPEG"):
+                create_app_icons(fixture, root / "invalid/AppIcon.appiconset")
+            with self.assertRaisesRegex(FormatError, "Missing regular"):
+                create_app_icons(root / "missing.dat", root / "missing-icons")
+            link = root / "linked.dat"
+            link.symlink_to(source)
+            with self.assertRaisesRegex(FormatError, "Missing regular"):
+                create_app_icons(link, root / "linked-icons")
 
     def test_private_resource_copy_hashes_and_ipa_layout(self):
         with tempfile.TemporaryDirectory() as temporary:

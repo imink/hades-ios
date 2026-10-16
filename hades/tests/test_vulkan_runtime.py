@@ -23,17 +23,19 @@ class VulkanRuntimeTests(unittest.TestCase):
             self.assertIn("((const uint64_t *)(r + 100))[1]", dispatch)
             for optimization in ("O0", "O2"):
                 executable = output / optimization
-                subprocess.run(["xcrun", "clang", "-std=c11", "-" + optimization,
+                build = subprocess.run(["xcrun", "clang", "-std=c11", "-" + optimization,
                     "-Wall", "-Wextra", "-Werror", "-fobjc-arc", "-DHADES_VULKAN_HOST", "-DHADES_VULKAN_TESTING",
                     "-I", str(include), "-I", str(output),
                     str(REPO / "hades/tests/vulkan_probe.c"), str(REPO / "hades/runtime/vulkan.m"),
                     str(REPO / "hades/runtime/callout.c"), str(REPO / "hades/runtime/host_entry.S"),
+                    str(REPO / "hades/runtime/lifecycle.c"),
                     str(REPO / "hades/runtime/memory.c"), str(REPO / "hades/runtime/ipc.c"),
                     str(REPO / "hades/runtime/audio.c"), "-framework", "AudioToolbox",
                     str(library), "-lc++", "-framework", "Foundation", "-framework", "Metal",
                     "-framework", "QuartzCore", "-framework", "IOSurface", "-framework", "IOKit",
                     "-framework", "CoreGraphics", "-framework", "AppKit", "-o", str(executable)],
-                    check=True, capture_output=True, timeout=180)
+                    capture_output=True, text=True, timeout=180)
+                self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
                 for completion_probe, load_probe, pass_probe in itertools.product(("0", "1"), repeat=3):
                     label = optimization + "-" + completion_probe + "-" + load_probe + "-" + pass_probe
                     capture = output / (label + ".ppm")
@@ -47,6 +49,7 @@ class VulkanRuntimeTests(unittest.TestCase):
                     self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
                     self.assertEqual(capture.read_bytes(), b"P6\n16 16\n255\n" + bytes((33,22,11))*256)
                     self.assertIn("VULKAN_BUFFER_GPU_OK:", run.stdout)
+                    self.assertIn("VULKAN_LIFECYCLE_GPU_IDLE_OK:", run.stdout)
                     self.assertIn("VULKAN_DESCRIPTOR_BUDGET_OK:", run.stdout)
                     self.assertIn("VULKAN_TEXTURE_SAMPLE_OK:", run.stdout)
                     self.assertIn("PASS_WINDOW_OK:", run.stdout)

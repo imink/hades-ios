@@ -5,6 +5,8 @@
 int hades_ipc_initialize(uint64_t process_id);
 int hades_ipc_shutdown(void);
 int hades_ipc_set_suspended(int suspended);
+int hades_ipc_lifecycle_transition(int suspended);
+void hades_ipc_wake_lifecycle(void);
 /* 1: active foreground; 2: inactive foreground. Background needs thread suspension. */
 int hades_ipc_set_focus_state(unsigned state);
 int hades_ipc_set_display_size(uint32_t width, uint32_t height);

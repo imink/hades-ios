@@ -1,5 +1,6 @@
 #define _DARWIN_C_SOURCE
 #include "host.h"
+#include "lifecycle.h"
 #include "memory.h"
 #include "save.h"
 #include "trace.h"
@@ -1060,6 +1061,7 @@ int hades_host_call(unsigned index, uint64_t *registers) {
 }
 
 void hades_host_dispatch(uint64_t index, uint64_t *registers) {
+    hades_lifecycle_host_enter();
     if (index >= HADES_HOST_COUNT || hades_host_call((unsigned)index, registers))
         exit(3);
 }

@@ -160,6 +160,7 @@ class CoreRuntimeTests(unittest.TestCase):
             for optimization in ("-O0", "-O2"):
                 subprocess.run(["xcrun", "clang", optimization, "-std=c11", "-Wall", "-Wextra", "-Werror",
                     str(REPO / "hades/tests/callout_probe.c"), str(REPO / "hades/runtime/callout.c"),
+                    str(REPO / "hades/runtime/lifecycle.c"),
                     str(REPO / "hades/runtime/memory.c"), str(REPO / "hades/runtime/host_entry.S"),
                     "-o", executable], check=True)
                 subprocess.run([executable], check=True, timeout=30)
@@ -284,6 +285,7 @@ class CoreRuntimeTests(unittest.TestCase):
                 subprocess.run(["xcrun", "clang", optimization, "-std=c11", "-Wall", "-Wextra", "-Werror",
                                 str(REPO / "hades/tests/host_probe.c"),
                                 str(REPO / "hades/runtime/host.c"),
+                                str(REPO / "hades/runtime/lifecycle.c"),
                                 str(REPO / "hades/runtime/save.c"),
                                 str(REPO / "hades/runtime/memory.c"), "-o", executable], check=True)
                 for probe in ("0", "1"):
@@ -328,6 +330,7 @@ class CoreRuntimeTests(unittest.TestCase):
                 subprocess.run(["xcrun", "clang", optimization, "-std=c11", "-Wall", "-Wextra", "-Werror",
                                 str(REPO / "hades/tests/transfer_probe.c"),
                                 str(REPO / "hades/runtime/ipc.c"),
+                                str(REPO / "hades/runtime/lifecycle.c"),
                                 str(REPO / "hades/runtime/audio.c"), "-framework", "AudioToolbox",
                                 str(REPO / "hades/runtime/memory.c"), "-o", executable], check=True)
                 subprocess.run([executable], check=True, timeout=30)
@@ -370,6 +373,7 @@ class CoreRuntimeTests(unittest.TestCase):
                 subprocess.run(["xcrun", "clang", optimization, "-std=c11", "-Wall", "-Wextra", "-Werror",
                                 str(REPO / "hades/tests/ipc_probe.c"),
                                 str(REPO / "hades/runtime/ipc.c"),
+                                str(REPO / "hades/runtime/lifecycle.c"),
                                 str(REPO / "hades/runtime/audio.c"), "-framework", "AudioToolbox",
                                 str(REPO / "hades/runtime/memory.c"), "-o", executable], check=True)
                 subprocess.run([executable], check=True, timeout=15)
@@ -391,6 +395,7 @@ class CoreRuntimeTests(unittest.TestCase):
                 subprocess.run(["xcrun", "clang", optimization, "-std=c11", "-Wall", "-Wextra", "-Werror",
                                 str(REPO / "hades/tests/thread_probe.c"),
                                 str(REPO / "hades/runtime/threads.c"),
+                                str(REPO / "hades/runtime/lifecycle.c"),
                                 str(REPO / "hades/runtime/memory.c"),
                                 str(REPO / "dm/host/entry.S"), "-o", executable], check=True)
                 for _ in range(4):

@@ -307,6 +307,7 @@ def generate_probe(root, output, use_host_services=False, moltenvk=None, render_
                             "-Wno-deprecated-declarations", "-I", str(REPO / "hades/runtime"),
                             str(REPO / "hades/runtime/core.c"), str(REPO / "hades/runtime/memory.c"),
                             str(REPO / "hades/runtime/callout.c"),
+                            str(REPO / "hades/runtime/lifecycle.c"),
                             str(REPO / "hades/runtime/ipc.c"),
                             str(REPO / "hades/runtime/audio.c"), "-framework", "AudioToolbox",
                             str(REPO / "hades/runtime/threads.c"),

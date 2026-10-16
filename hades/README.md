@@ -613,6 +613,182 @@ authorization, USB update, two stopped-process checks and a complete backup,
 all 10 save-file hashes remained identical and the fresh v31 receipt matched.
 The user has not yet tested the physical haptic response.
 
+### Version 32 left trait HUD inset (installed, user confirms rightward shift)
+
+The `wide-720p` read-only UIData overlay moves `CombatUI.TraitUIStart` from
+50 to 230 and adds 180 to `TraitUI.IconStartX`. The shared anchors move the
+backing, placeholder frames/icons, acquired traits and expanded tray together.
+At the current 932pt landscape width this is about 71.7pt rightward, intended
+to clear the camera area. This is a fixed inset for the current wide preset,
+not dynamic notch detection or a guarantee for other devices. Health, world
+rendering, touch controls and haptics are unchanged; 720p/1080p have no UI overlay.
+Original source hashes and unique replacement anchors are required. Both UI
+tables are already excluded from save restoration by the original game.
+
+All 82 regressions pass. The signed package retains the same five guest images,
+291 resources, render dimensions and 31 other overlays as v31; only UIData
+overlay bytes differ. Mac baseline/candidate runs reached 12000 presents but
+captured black full-frame output, so they do **not** verify HUD positioning.
+The original save snapshots were unchanged and all bounded probes were stopped.
+The user authorized USB installation; two stopped-process checks, complete backup,
+all 10 identical save-file hashes and the fresh v32 receipt were confirmed.
+The user subsequently confirmed the rightward shift works. Expanded-tray
+alignment has not been separately confirmed. The v31 baseline is committed
+separately; the requested standalone HUD commit is still pending.
+
+### Version 33 GPU-capture default fix (installed, foreground check passed)
+
+The latest v32 device session ends during the presentation-count 1800 capture
+window, after 91 recorded attachments, with
+`Pass capture exceeds its explicit readback memory budget`. `record_pass_pixels`
+rejects aggregate readback above 384 MiB; the failure propagates through
+`track_pass_call`, `hades_vulkan_call` and `hades_host_dispatch` to `exit(3)`.
+This explains an app exit without an ordinary exception report. The available
+Hades system-report inventory contains CPU-resource reports, not a matching
+ordinary crash report; those are not evidence of this exit's cause.
+
+Normal packages now explicitly disable both pixel and per-pass GPU captures.
+Directory ordering, argument-buffer bindings, FPS/monitor metrics, bounded logs,
+HUD overlays, touch and haptics remain unchanged. Packaging with
+`--moltenvk ... --gpu-capture-probe` explicitly restores both captures for
+diagnosis only: it changes timing, allocates extra GPU readback memory and
+**can still terminate at the diagnostic budget**. The budget and Vulkan error
+handling have not been relaxed. Launch configuration is now included in the
+build receipt and package report, distinguishing capture and normal packages
+even with identical source and guest images.
+All 18 targeted packaging/display regressions pass. The capture-default check
+fails against the committed pre-fix implementation and passes with this candidate;
+these are source/configuration checks, not device runtime evidence. The full
+86-test suite also passes. A new wide-720p package and frozen Xcode target were
+built and Apple Development-signed using the existing local signing setup.
+The signed artifact verifies 15 AOT sections, 291 resources and 50 frozen sources;
+all five guest images, render parameters and 32 HUD overlays match v32.
+The signed flags disable both captures, while directory ordering and bindings
+are preserved; signed entitlements are identical to v32.
+
+For future exits, retain `Documents/hades-device.log` before relaunching, and
+analyze only the latest `APP_LAUNCH`/receipt interval: the file appends earlier
+sessions. With an unlocked USB-connected device, use `xcrun devicectl device
+copy from` with `--domain-type appDataContainer`,
+`--domain-identifier local.hades.porttest`, `--source Documents/hades-device.log`
+and a private `--destination`, together with `--device <device>`. List matching
+system reports using `device info files --domain-type systemCrashLogs
+--search HadesPortTest`; copy only relevant reports. If memory-pressure
+termination is suspected and no app report exists, inspect the corresponding
+Jetsam report. Do not equate CPU-resource reports with exception crashes.
+Keep logs/reports private and outside version control. Following fresh permission,
+two stopped-process checks and a complete backup, v33 was USB-installed with all
+10 save-file hashes unchanged and its fresh launch receipt confirmed. The user
+reports ten minutes of foreground play without another exit. Read-only log
+collection confirms the matching v33 receipt, real game entry and 34200 logged
+presents, beyond the old frame-1800 failure window, with no heavy pixel/pass
+capture or capture-budget error. This is bounded confirmation of this fix,
+not proof of full-game or indefinite stability.
+
+The separate background-exit problem remains: the same session records
+`FOREGROUND_ONLY_ABORT`. `sceneDidEnterBackground` explicitly calls `_Exit(75)`
+for active GPU/SDK/game execution because guest-thread/GPU suspension has not
+been integrated. Returning to the diagnostic page after relaunch is not game
+resume; removing this guard alone would not establish a safe background path.
+The latest memory sample reports about 1062 MiB resident, 2320 MiB physical
+footprint and 1139 MiB Metal allocation; these overlap and must not be added.
+No corresponding Jetsam cause has been established. Safe pause/resume needs
+guest-thread quiescence, a GPU submission gate and completion of in-flight work,
+audio/input/time handling and foreground surface restoration before this guard
+can be replaced. Even then iOS can reclaim the suspended process under pressure.
+
+### Version 34 cooperative pause/resume (installed, app-switch recovery confirmed)
+
+Game mode now enables `HadesSafePauseResume`. On scene deactivation, registered
+guest threads stop at outer host-call boundaries; nested driver callbacks finish
+before parking. HLE event, mutex/key and sleep waits release their locks while
+parked. Once guest/native execution is quiescent, the owning SDK pthread drains
+real Vulkan devices with `vkDeviceWaitIdle` and pauses audio. The same owner
+resumes audio before releasing execution; guest timers and wait deadlines exclude
+the pause. Touch input is released/disabled until foreground surface restoration.
+No CPU thread is forcibly suspended and no guest GPU handle is replaced.
+
+Only a confirmed paused game bypasses the old background exit. A failed
+1.5-second transition still logs an error and terminates with status 75; GPU/SDK
+diagnostic-only modes remain foreground-only. This is not background gameplay,
+automatic saving, memory reduction or protection against iOS reclamation.
+O0/O2 regressions cover repeated pauses, nested guarded callbacks, waiters, new
+threads, frozen time, failure paths and a real GPU copy drained before pause
+acknowledgment. The complete 87-test suite passes. The Apple Development-signed
+candidate has 15 verified AOT sections, 291 resources and 52 frozen sources, with
+the same entitlements, guest images, resources and 32 HUD overlays as version 33.
+Local build logs are `v34-package.log` and `v34-apple-signing.log` under the private
+artifact root; `v34-signed-verification.json` records the signed receipt.
+After fresh user authorization and confirmed app closure, version 34 was
+USB-installed between two stopped-process checks and a complete private state
+backup. All 12 state/save file hashes match before and after installation, and
+the fresh version-34 launch receipt is confirmed. The game was not auto-started.
+Subsequent read-only device logs confirm two ordered GPU-idle/paused/background/
+resumed cycles in the same version-34 launch, with successful presentation
+continuing through frame 1800 and no lifecycle failure or foreground-only abort.
+The user confirms the original scene, audio and controls are normal after app
+switching and play can continue. Private evidence is
+`device-v34-lifecycle-check-20261015-235600/session-verification.json`.
+This is bounded app-switch verification, not lock-screen/interruption, long-run
+stability or memory-pressure survival verification.
+
+### Version 36 direct game startup and monitor-only log entry
+
+Normal Vulkan packages enable `HadesAutoStartGame`: the first active foreground
+appearance starts game mode once, without displaying the diagnostic page.
+The loading screen reports the actual number of hash-verified RomFS files, then
+waits for the first successful presentation before hiding and enabling controls.
+Full resource validation, game/save handling and version-34 lifecycle coordination
+are retained; a startup error reveals the local diagnostics instead of retrying
+or pretending the game loaded.
+
+The on-screen bottom-center log button is removed. Tap the top-right FPS label,
+then **View / export local logs** inside the monitor panel to reach diagnostics
+and the existing explicit export action. Returning to the game hides the monitor.
+Logs remain local; opening diagnostics does not pause or restart a running guest.
+For local troubleshooting, `--hades-diagnostics` suppresses automatic startup;
+`--hades-probe core` and `--hades-probe gpu` each still run only their selected
+probe. Duplicate/conflicting requests are rejected. Non-Vulkan packages retain
+diagnostic startup.
+
+Version 35 was signed and installed with all 12 state/save hashes preserved,
+but its initial device log contained no game-autostart/worker/presentation
+records, so automatic startup was not accepted as working. Version 36 defers
+appearance/scene-activation startup checks to the next main-queue turn, allowing
+UIKit's application-active state to settle while retaining the foreground guard.
+The actual-controller UIKit regression now models an inactive application during
+the scene callback and checks one launch after it returns, alongside monitor log
+navigation, first-presentation loading completion and real resource-hash rejection.
+Version 36 is signed and installed with all 12 state/save hashes preserved and
+the fresh build receipt confirmed. The latest-launch device log records exactly
+one automatic game launch and one worker launch, all 3066 RomFS files verified,
+loading completion after a successful presentation, and continued presentations
+through count 600, without startup failure markers. The user confirms direct game
+startup and the log entry inside the FPS monitor work as expected.
+Private evidence: `device-v36-startup-check-20261016-154427/session-verification.json`.
+This verifies the startup/navigation change, not full-game or long-run stability.
+
+### Version 37 app name and local game icon
+
+The Home Screen and bundle display names are **Hades**. The bundle identifier
+`local.hades.porttest` and executable remain unchanged, preserving the existing
+app container when updating rather than creating a separate app.
+Packaging now requires `data/control/icon_AmericanEnglish.dat` from the verified
+local extraction instead of drawing a placeholder H. The original opaque 256×256
+JPEG is resized into all iPhone/iPad icon slots and the 1024×1024 marketing slot
+using macOS `sips`; upscaling does not add source detail. Missing or invalid icons
+fail packaging, without downloading artwork or silently substituting a placeholder.
+The source icon hash is included in the build receipt's launch configuration,
+and generated icon hashes are recorded in the private package report. Artwork
+and generated icons remain outside git. Installation requires a new signed build
+and the usual saved/closed-app confirmation and complete save backup.
+Version 37 has been development-signed and installed with the fresh receipt
+confirmed and all 12 state/save hashes unchanged. The user confirms both the
+Home Screen name and original game icon are correct. The guest images, resources,
+render settings, HUD overlays, startup/lifecycle code and signed entitlements
+are unchanged from version 36; this branding acceptance is not a new gameplay
+or long-run stability test.
+
 Version 9 logs a `build` number and `receipt` derived from code/header, five
 rewritten-image, binding and pinned-framework hashes, independent of output paths.
 This identifies the device test artifact, not Apple signing, pixel correctness or gameplay.
@@ -628,7 +804,8 @@ iPhone 15 Pro Max memory compatibility.
 
 Version 10 accepts explicit local CoreDevice launch arguments `--hades-probe core`
 or `--hades-probe gpu`, executing once after the diagnostic view appears in the
-active foreground. Ordinary launch does not auto-test. Duplicate, missing and
+active foreground. Version 10 did not auto-test on ordinary launch; version 36
+uses the foreground game-start policy described above. Duplicate, missing and
 unsupported modes are rejected; SDK/game autostart is deliberately unavailable.
 Unlock the device and foreground the app: successful process launch is not probe
 execution. Require the current build's `EXPLICIT_PROBE`, `TEST_BEGIN`, final

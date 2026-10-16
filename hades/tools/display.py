@@ -24,6 +24,7 @@ WIDE_WORDS = {
     0x6CEF78: 0x44F00000,  # shared virtual width: 1920.0
 }
 WIDE_VIRTUAL_WIDTH = 2340
+TRAIT_HUD_INSET_X = 180
 UI_DATA_SHA256 = "f91dd404c5712a8be17304539bd52b5991bd7d0e109445da237be14e6843a0e1"
 ROOM_MANAGER_SHA256 = "de4642b0cbdd8f59c1871073b57da7398eba7afb4d29f48b38a99d815875befb"
 
@@ -103,22 +104,31 @@ def centered_gui(source):
     return result
 
 
+def widened_ui_data(source):
+    if hashlib.sha256(source).hexdigest() != UI_DATA_SHA256:
+        raise FormatError("Wide UIData requires the identified original source")
+    changed = source
+    for before, after in ((b"ScreenCenterX = 1920/2", b"ScreenCenterX = 2340/2"),
+                          (b"ScreenWidth = 1920", b"ScreenWidth = 2340"),
+                          (b"\tTraitUIStart = 50,",
+                           f"\tTraitUIStart = {50 + TRAIT_HUD_INSET_X},".encode()),
+                          (b"\tIconStartX = 27 + 64 - 40,",
+                           f"\tIconStartX = 27 + 64 - 40 + {TRAIT_HUD_INSET_X},".encode())):
+        if changed.count(before) != 1:
+            raise FormatError("Wide UIData canvas anchor mismatch")
+        changed = changed.replace(before, after)
+    # Main.Load restores saved globals after UIData; display geometry must remain runtime-only.
+    changed += b"\nSaveIgnores.ScreenCenterX = true\nSaveIgnores.ScreenWidth = true\n"
+    return changed
+
+
 def ui_overlays(root, preset):
     if preset != "wide-720p":
         return []
     romfs = root / "data/RomFS"
     script = romfs / "Content/Scripts/UIData.lua"
     source = script.read_bytes()
-    if hashlib.sha256(source).hexdigest() != UI_DATA_SHA256:
-        raise FormatError("Wide UIData requires the identified original source")
-    changed = source
-    for before, after in ((b"ScreenCenterX = 1920/2", b"ScreenCenterX = 2340/2"),
-                          (b"ScreenWidth = 1920", b"ScreenWidth = 2340")):
-        if changed.count(before) != 1:
-            raise FormatError("Wide UIData canvas anchor mismatch")
-        changed = changed.replace(before, after)
-    # Main.Load restores saved globals after UIData; display geometry must remain runtime-only.
-    changed += b"\nSaveIgnores.ScreenCenterX = true\nSaveIgnores.ScreenWidth = true\n"
+    changed = widened_ui_data(source)
     variants = [(script, source, changed)]
     room_manager = romfs / "Content/Scripts/RoomManager.lua"
     source = room_manager.read_bytes()
